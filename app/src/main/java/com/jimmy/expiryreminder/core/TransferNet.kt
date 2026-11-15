@@ -3,12 +3,14 @@ package com.jimmy.expiryreminder.core
 import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.os.Build
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -24,6 +26,7 @@ import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.Inet4Address
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
@@ -391,9 +394,23 @@ class TransferDiscovery(
         val port: Int,
     )
 
+    /**
+     * 发现状态。以前这里失败是静默的：`runCatching` 吞掉异常、回调只置一个内部 flag，
+     * 页面永远显示「正在搜索…」，用户分不清是没设备、被路由器挡了、还是系统根本不让发现。
+     * 现在把失败原因直接交给 UI。
+     */
+    data class State(
+        val running: Boolean = false,
+        /** 面向用户的失败原因；null 表示正常。 */
+        val error: String? = null,
+    )
+
     private val nsd = context.getSystemService(Context.NSD_SERVICE) as? NsdManager
     private val _peers = MutableStateFlow<List<Peer>>(emptyList())
     val peers: StateFlow<List<Peer>> = _peers.asStateFlow()
+
+    private val _state = MutableStateFlow(State())
+    val state: StateFlow<State> = _state.asStateFlow()
 
     private var started = false
     private var registrationListener: NsdManager.RegistrationListener? = null
@@ -403,11 +420,24 @@ class TransferDiscovery(
     /** resolveService 并发调用会 FAILURE_ALREADY_ACTIVE，这里串成队列逐个来。 */
     private val resolveQueue = java.util.ArrayDeque<NsdServiceInfo>()
     private val resolvingOne = java.util.concurrent.atomic.AtomicBoolean(false)
+    /** 每个服务的解析失败次数：mDNS 多播丢包很常见，失败几次再放弃。 */
+    private val resolveFailures = ConcurrentHashMap<String, Int>()
+    /** 延迟重试用的作用域，随 stop() 一起取消。 */
+    private var scope: CoroutineScope? = null
 
     fun start(port: Int) {
         if (started) return
-        val manager = nsd ?: return
+        val manager = nsd
+        if (manager == null) {
+            _state.value = State(
+                running = false,
+                error = "系统没有提供局域网发现服务（NsdManager 不可用），只能用「手动连接」输入对方地址",
+            )
+            return
+        }
         started = true
+        scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        _state.value = State(running = true)
 
         val info = NsdServiceInfo().apply {
             serviceName = "JEX-${deviceId.take(8)}"
@@ -417,16 +447,31 @@ class TransferDiscovery(
             setAttribute("name", deviceName)
         }
         val registration = object : NsdManager.RegistrationListener {
-            override fun onServiceRegistered(serviceInfo: NsdServiceInfo) {}
-            override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {}
+            override fun onServiceRegistered(serviceInfo: NsdServiceInfo) {
+                _state.update { it.copy(error = null) }
+            }
+
+            override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                // 广播失败不影响本机搜索，但对方永远搜不到这台设备，必须说出来
+                _state.update {
+                    it.copy(error = "本机服务未能广播（错误码 $errorCode），对方可能搜不到这台设备")
+                }
+            }
+
             override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) {}
             override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {}
         }
         registrationListener = registration
-        runCatching { manager.registerService(info, NsdManager.PROTOCOL_DNS_SD, registration) }
+        runCatching {
+            manager.registerService(info, NsdManager.PROTOCOL_DNS_SD, registration)
+        }.onFailure { e ->
+            _state.update { it.copy(error = "本机服务注册失败：${describe(e)}") }
+        }
 
         val discovery = object : NsdManager.DiscoveryListener {
-            override fun onDiscoveryStarted(serviceType: String) {}
+            override fun onDiscoveryStarted(serviceType: String) {
+                _state.update { it.copy(running = true, error = null) }
+            }
 
             override fun onServiceFound(serviceInfo: NsdServiceInfo) {
                 if (serviceInfo.serviceType != TRANSFER_SERVICE_TYPE) return
@@ -436,12 +481,17 @@ class TransferDiscovery(
 
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {
                 seen.remove(serviceInfo.serviceName)
+                resolveFailures.remove(serviceInfo.serviceName)
                 _peers.update { list -> list.filterNot { it.serviceName == serviceInfo.serviceName } }
             }
 
             override fun onDiscoveryStopped(serviceType: String) {}
             override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
                 started = false
+                _state.value = State(
+                    running = false,
+                    error = "局域网发现启动失败（错误码 $errorCode），可点「重试搜索」或改用「手动连接」",
+                )
             }
 
             override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {}
@@ -449,8 +499,17 @@ class TransferDiscovery(
         discoveryListener = discovery
         runCatching {
             manager.discoverServices(TRANSFER_SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discovery)
+        }.onFailure { e ->
+            started = false
+            _state.value = State(
+                running = false,
+                error = "局域网发现启动失败：${describe(e)}，可点「重试搜索」或改用「手动连接」",
+            )
         }
     }
+
+    private fun describe(e: Throwable): String =
+        e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
 
     private fun enqueueResolve(manager: NsdManager, info: NsdServiceInfo) {
         synchronized(resolveQueue) { resolveQueue.addLast(info) }
@@ -470,8 +529,13 @@ class TransferDiscovery(
         }
         @Suppress("DEPRECATION")
         val listener = object : NsdManager.ResolveListener {
-            override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) = finish()
+            override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) {
+                finish()
+                retryResolveLater(manager, info, errorCode)
+            }
+
             override fun onServiceResolved(info: NsdServiceInfo) {
+                resolveFailures.remove(info.serviceName)
                 addPeer(info)
                 finish()
             }
@@ -480,11 +544,42 @@ class TransferDiscovery(
             @Suppress("DEPRECATION")
             manager.resolveService(next, listener)
         }.isSuccess
-        if (!started) finish()
+        if (!started) {
+            finish()
+            retryResolveLater(manager, next, -1)
+        }
+    }
+
+    /**
+     * 解析失败重试：mDNS 多播丢包、路由器限速都会导致偶发失败，
+     * 以前一次失败就永久丢掉这台设备（`seen` 里还留着名字，后续 found 也不会再解析）。
+     */
+    private fun retryResolveLater(manager: NsdManager, info: NsdServiceInfo, errorCode: Int) {
+        val attempts = (resolveFailures[info.serviceName] ?: 0) + 1
+        if (attempts > MAX_RESOLVE_ATTEMPTS) {
+            resolveFailures.remove(info.serviceName)
+            // 放开去重，让下一次广播重新尝试；否则这台设备这辈子都不会再出现
+            seen.remove(info.serviceName)
+            return
+        }
+        resolveFailures[info.serviceName] = attempts
+        scope?.launch {
+            delay(600L * attempts)
+            if (started) enqueueResolve(manager, info)
+        }
     }
 
     private fun addPeer(info: NsdServiceInfo) {
-        val host = info.host?.hostAddress ?: return
+        // API 34+ 一次能拿到全部地址；只取单个 host 时经常是 IPv6 link-local（fe80::），
+        // 不带 scopeId 直连必超时——这里统一 IPv4 优先。
+        val addresses = if (Build.VERSION.SDK_INT >= 34) {
+            info.hostAddresses
+        } else {
+            @Suppress("DEPRECATION")
+            listOfNotNull(info.host)
+        }
+        val host = (addresses.filterIsInstance<Inet4Address>().firstOrNull()
+            ?: addresses.firstOrNull())?.hostAddress ?: return
         val port = info.port
         if (port <= 0) return
         val attrs = info.attributes.orEmpty()
@@ -506,9 +601,18 @@ class TransferDiscovery(
         registrationListener = null
         started = false
         seen.clear()
+        resolveFailures.clear()
         synchronized(resolveQueue) { resolveQueue.clear() }
         resolvingOne.set(false)
+        scope?.cancel()
+        scope = null
         _peers.value = emptyList()
+        _state.value = State()
+    }
+
+    private companion object {
+        /** 单个服务最多解析几次（含首次）。 */
+        const val MAX_RESOLVE_ATTEMPTS = 3
     }
 }
 

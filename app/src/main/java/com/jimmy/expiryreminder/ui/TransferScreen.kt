@@ -40,6 +40,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -59,6 +60,7 @@ import com.jimmy.expiryreminder.core.Spaces
 import com.jimmy.expiryreminder.core.TransferManager
 import com.jimmy.expiryreminder.core.TransferPayload
 import com.jimmy.expiryreminder.core.TransferServer
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -76,6 +78,7 @@ fun TransferScreen(itemIds: List<String>, onBack: () -> Unit) {
     val storeState by store.state.collectAsStateWithLifecycle()
     val running by manager.running.collectAsStateWithLifecycle()
     val peers by manager.peers.collectAsStateWithLifecycle()
+    val discovery by manager.discoveryState.collectAsStateWithLifecycle()
     val deviceName by manager.deviceName.collectAsStateWithLifecycle()
     val localIp by manager.localIp.collectAsStateWithLifecycle()
     val localPort by manager.port.collectAsStateWithLifecycle()
@@ -91,6 +94,16 @@ fun TransferScreen(itemIds: List<String>, onBack: () -> Unit) {
     DisposableEffect(Unit) {
         manager.start(context)
         onDispose { manager.stop() }
+    }
+
+    // 搜索超过这么久还没结果，就不再让用户干等，直接把可能原因摊开
+    var searchTooLong by remember { mutableStateOf(false) }
+    LaunchedEffect(peers.isEmpty(), running) {
+        searchTooLong = false
+        if (running && peers.isEmpty()) {
+            delay(SEARCH_HINT_DELAY_MS)
+            searchTooLong = true
+        }
     }
 
     val items = remember(storeState, itemIds) { itemIds.mapNotNull { store.getItem(it) } }
@@ -211,6 +224,13 @@ fun TransferScreen(itemIds: List<String>, onBack: () -> Unit) {
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                        discovery.error?.let { reason ->
+                            Text(
+                                reason,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = hexColor("#F56C6C"),
+                            )
+                        }
                     }
                     Box(
                         Modifier
@@ -355,12 +375,22 @@ fun TransferScreen(itemIds: List<String>, onBack: () -> Unit) {
             val visiblePeers = remember(peers) { peers.distinctBy { it.key } }
             if (visiblePeers.isEmpty()) {
                 Text(
-                    "正在搜索…请确认两台设备连在同一个 Wi-Fi，且都没有开启「AP 隔离」。"
-                        + "找不到时可以点上面的「手动连接」输入对方地址。",
+                    if (discovery.error != null) "搜索已中断，原因见上方提示"
+                    else "正在搜索同一 Wi-Fi 下的设备…",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 2.dp, vertical = 6.dp),
                 )
+                // 一直搜不到就把可能原因摊开，别让用户对着「正在搜索…」干等
+                if (searchTooLong || discovery.error != null) {
+                    Spacer(Modifier.height(8.dp))
+                    SearchHelpCard(
+                        error = discovery.error,
+                        canRetry = running,
+                        onRetry = { manager.retryDiscovery() },
+                        onManual = { manualDialog = true },
+                    )
+                }
             } else {
                 for (peer in visiblePeers) {
                     PeerRow(
@@ -827,6 +857,59 @@ private fun SectionLabel(text: String) {
         color = MaterialTheme.colorScheme.primary,
         modifier = Modifier.padding(start = 2.dp, top = 16.dp, bottom = 8.dp),
     )
+}
+
+/** 搜索多久没结果就展示自查卡。 */
+private const val SEARCH_HINT_DELAY_MS = 12_000L
+
+private val SEARCH_HINTS = listOf(
+    "两台设备要连在同一个 Wi-Fi（手机热点也算），路由器别开「AP 隔离 / 访客网络」",
+    "关掉 VPN 和「网络加速」类功能，它们会挡掉局域网广播",
+    "一加 / OPPO 机型：设置里的「流量管理 → 联网权限」若限制了本应用，同样连不上",
+    "系统权限：局域网传输不需要额外授权，应用权限页里没有网络项是正常的",
+)
+
+/** 搜索超时或发现启动失败时给的排查卡片（含重试与手动连接入口）。 */
+@Composable
+private fun SearchHelpCard(
+    error: String?,
+    canRetry: Boolean,
+    onRetry: () -> Unit,
+    onManual: () -> Unit,
+) {
+    Card {
+        Text(
+            "搜不到设备？",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+        )
+        error?.let { reason ->
+            Spacer(Modifier.height(4.dp))
+            Text(
+                reason,
+                style = MaterialTheme.typography.labelSmall,
+                color = hexColor("#F56C6C"),
+            )
+        }
+        Spacer(Modifier.height(6.dp))
+        for (hint in SEARCH_HINTS) {
+            Text(
+                "· $hint",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedButton(
+                onClick = onRetry,
+                enabled = canRetry,
+                shape = RoundedCornerShape(10.dp),
+            ) { Text("重试搜索") }
+            Spacer(Modifier.width(8.dp))
+            Button(onClick = onManual, shape = RoundedCornerShape(10.dp)) { Text("手动连接") }
+        }
+    }
 }
 
 @Composable

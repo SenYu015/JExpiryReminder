@@ -56,6 +56,9 @@ class TransferManager private constructor() {
     private var server: TransferServer? = null
     private var discovery: TransferDiscovery? = null
     private var collectJob: Job? = null
+    /** 发现层的订阅（重试搜索时要整体重建，单独持有便于取消）。 */
+    private var discoveryJobs: List<Job> = emptyList()
+    private var appContext: Context? = null
 
     private val _running = MutableStateFlow(false)
     val running: StateFlow<Boolean> = _running.asStateFlow()
@@ -65,6 +68,10 @@ class TransferManager private constructor() {
 
     private val _peers = MutableStateFlow<List<Peer>>(emptyList())
     val peers: StateFlow<List<Peer>> = _peers.asStateFlow()
+
+    /** 局域网发现的状态（失败原因会直接展示在传输页，便于用户自查）。 */
+    private val _discoveryState = MutableStateFlow(TransferDiscovery.State())
+    val discoveryState: StateFlow<TransferDiscovery.State> = _discoveryState.asStateFlow()
 
     private val _pairRequest = MutableStateFlow<TransferServer.PairRequest?>(null)
     val pairRequest: StateFlow<TransferServer.PairRequest?> = _pairRequest.asStateFlow()
@@ -95,6 +102,7 @@ class TransferManager private constructor() {
     fun start(context: Context) {
         if (_running.value) return
         val appContext = context.applicationContext
+        this.appContext = appContext
         _deviceId.value = deviceIdOf(appContext)
         _deviceName.value = defaultDeviceName()
         val srv = TransferServer(appContext, _deviceId.value, _deviceName.value)
@@ -111,30 +119,58 @@ class TransferManager private constructor() {
             launch { srv.pairRequest.collect { _pairRequest.value = it } }
             launch { srv.incoming.collect { _batches.value = it } }
             launch { srv.syncOffer.collect { _syncOffer.value = it } }
-            launch {
+        }
+        bindDiscovery(disc)
+    }
+
+    /** 订阅一台 [TransferDiscovery] 的设备列表与状态；重试搜索时先取消旧的再绑新的。 */
+    private fun bindDiscovery(disc: TransferDiscovery) {
+        discoveryJobs.forEach { it.cancel() }
+        discoveryJobs = listOf(
+            scope.launch {
                 disc.peers.collect { found ->
                     val mapped = found.map {
                         Peer(key = it.serviceName, name = it.name, host = it.host, port = it.port)
                     }
                     _peers.value = mapped + manualPeers
                 }
-            }
-        }
+            },
+            scope.launch { disc.state.collect { _discoveryState.value = it } },
+        )
+    }
+
+    /**
+     * 重启局域网发现。系统偶尔会拒绝 discoverServices（错误码 0=INTERNAL_ERROR），
+     * 或用户在传输中途开关过 Wi-Fi，这时只重启发现层即可，不必关掉接收服务。
+     */
+    fun retryDiscovery() {
+        if (!_running.value) return
+        val ctx = appContext ?: return
+        discovery?.stop()
+        val disc = TransferDiscovery(ctx, _deviceId.value, _deviceName.value)
+        disc.start(_port.value)
+        discovery = disc
+        _peers.value = manualPeers.toList()
+        bindDiscovery(disc)
     }
 
     fun stop() {
         collectJob?.cancel()
         collectJob = null
+        discoveryJobs.forEach { it.cancel() }
+        discoveryJobs = emptyList()
         discovery?.stop()
         discovery = null
         server?.stop()
         server = null
+        appContext = null
         manualPeers.clear()
         _peers.value = emptyList()
         _pairRequest.value = null
         _batches.value = emptyList()
         _running.value = false
         _port.value = 0
+        _discoveryState.value = TransferDiscovery.State()
         _sendState.value = null
         _syncState.value = null
         _syncOffer.value = null
@@ -216,9 +252,12 @@ class TransferManager private constructor() {
             ) { sent ->
                 _sendState.update { it?.copy(sentBytes = sent, totalBytes = total) }
             }
-            result
+            result.fold(
+                onSuccess = { Result.success(it) },
+                onFailure = { Result.failure(explain(it)) },
+            )
         } catch (e: Exception) {
-            Result.failure(e)
+            Result.failure(explain(e))
         } finally {
             zip?.delete()
             _sendState.value = null
@@ -317,12 +356,29 @@ class TransferManager private constructor() {
                 ),
             )
         } catch (e: Exception) {
-            Result.failure(e)
+            Result.failure(explain(e))
         } finally {
             zip?.delete()
             replyZip?.delete()
             _syncState.value = null
         }
+    }
+
+    /**
+     * 把底层网络异常翻成用户能照着排查的话。
+     * 缺权限/被拦时的表现就是「超时」，光抛 `connect timed out` 没人能看懂。
+     */
+    private fun explain(e: Throwable): Exception {
+        val raw = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
+        val hint = when {
+            raw.contains("timed out", true) || raw.contains("timeout", true) ->
+                "确认两台设备连在同一个 Wi-Fi 网段、没有开 VPN，路由器没开 AP 隔离"
+            raw.contains("unreachable", true) || raw.contains("no route", true) ->
+                "两台设备可能不在同一网段，检查 Wi-Fi 是否一个 2.4G 一个 5G"
+            raw.contains("refused", true) -> "对方可能已关闭接收页，或端口被占用"
+            else -> null
+        }
+        return IllegalStateException(if (hint == null) raw else "$raw（$hint）", e)
     }
 
     private fun deviceIdOf(context: Context): String {
