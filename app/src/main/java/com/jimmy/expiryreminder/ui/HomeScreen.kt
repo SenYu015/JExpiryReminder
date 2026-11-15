@@ -150,15 +150,16 @@ class HomeFilterState(
 /** 参考稿样式首页：白底标题区 + 统计卡 + 搜索/筛选 + 状态分组列表。
  *
  * [filter] 由调用方持有，保证切页回来筛选不丢；
- * [onAdd] 会带上当前筛选的分类 id（「全部分类」时为 null），新增页据此预选分类。 */
+ * [onAdd] / [onOcr] 会带上当前筛选的分类与空间（「全部分类」「全部空间」「未分配」时为 null），
+ * 新增页据此预选，避免在某个空间下新增还得再手动选一次空间。 */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun HomeScreen(
     filter: HomeFilterState,
-    /** [defaultCategory] 为当前筛选的分类，「全部分类」时传 null；新建物品的空间默认为空。 */
-    onAdd: (defaultCategory: String?) -> Unit,
+    /** [defaultCategory] / [defaultSpace] 为当前筛选的分类与空间，无筛选时传 null。 */
+    onAdd: (defaultCategory: String?, defaultSpace: String?) -> Unit,
     /** 图像识别入口：选图 → 识别 → 带结果进添加页。 */
-    onOcr: (defaultCategory: String?) -> Unit,
+    onOcr: (defaultCategory: String?, defaultSpace: String?) -> Unit,
     onEdit: (String) -> Unit,
     onSettings: () -> Unit,
     onCategories: () -> Unit,
@@ -321,6 +322,10 @@ fun HomeScreen(
     val targetCategory = filter.category.takeIf {
         it != HomeFilterState.ALL && store.categoryOf(it) != null
     }
+    // 新增/识别带上的空间：同上，「全部空间」/「未分配」/ 已被删掉的空间都传 null
+    val targetSpace = filter.space.takeIf {
+        it != Spaces.ALL && it.isNotEmpty() && store.spaceOf(it) != null
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -343,8 +348,8 @@ fun HomeScreen(
                 HomeBottomBar(
                     keyword = filter.keyword,
                     onKeywordChange = { filter.keyword = it },
-                    onOcr = { onOcr(targetCategory) },
-                    onAdd = { onAdd(targetCategory) },
+                    onOcr = { onOcr(targetCategory, targetSpace) },
+                    onAdd = { onAdd(targetCategory, targetSpace) },
                 )
             }
         },

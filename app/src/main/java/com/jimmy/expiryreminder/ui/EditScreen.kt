@@ -135,6 +135,8 @@ private const val MAX_NOTE = 200
 fun EditScreen(
     itemId: String?,
     defaultCategory: String? = null,
+    /** 主页当前筛选的空间；新增时用它作默认归属，「全部空间」「未分配」为 null。 */
+    defaultSpace: String? = null,
     /** 识别预填结果；纯手动新增时为 null。 */
     prefill: PrefillDraft? = null,
     onDone: () -> Unit,
@@ -158,9 +160,13 @@ fun EditScreen(
     var productionDate by remember {
         mutableStateOf(existing?.productionDate ?: prefill?.productionDate ?: "")
     }
-    // 归属空间：编辑已有物品用它的空间；新增默认「不归属空间」（空间默认为空）
+    // 归属空间：编辑已有物品用它的空间；新增时用主页筛选的空间（没有筛选则「不归属空间」）
     var spaceId by remember {
-        mutableStateOf(existing?.let { store.resolveSpaceId(it.spaceId) } ?: "")
+        mutableStateOf(
+            existing?.let { store.resolveSpaceId(it.spaceId) }
+                ?: defaultSpace?.takeIf { it.isNotEmpty() && store.spaceOf(it) != null }
+                ?: ""
+        )
     }
     var shelfLifeText by remember {
         mutableStateOf(
