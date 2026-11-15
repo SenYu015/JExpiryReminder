@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.0](https://github.com/nickynull/JExpiryReminder/compare/v1.10.0...v1.11.0) (2026-11-15)
+
+
+### Features
+
+* 新增物品时自动带入主页当前筛选的空间 ([95acfe5](https://github.com/nickynull/JExpiryReminder/commit/95acfe51fb635ba0d455c626caadfea0af7ef150))
+
 ## [1.10.0](https://github.com/nickynull/JExpiryReminder/compare/v1.9.2...v1.10.0) (2026-11-15)
 
 
