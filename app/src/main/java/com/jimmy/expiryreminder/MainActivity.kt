@@ -17,6 +17,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.mapSaver
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -105,28 +106,34 @@ class MainActivity : ComponentActivity() {
                     val homeFilter = rememberSaveable(saver = HomeFilterState.Saver) {
                         HomeFilterState()
                     }
+                    // 主页离开组合（跳编辑页等）时暂存它内部所有 rememberSaveable 状态，
+                    // 返回时原样恢复——否则列表滚动位置会丢，回到顶部。
+                    // 只包主页：编辑页等二级页每次进入都应是干净的，不恢复上次草稿。
+                    val homeStateHolder = rememberSaveableStateHolder()
                     // 二级页面按返回键回到主页，不直接退出应用
                     BackHandler(enabled = screen != Screen.Home) {
                         screen = Screen.Home
                     }
                     when (val s = screen) {
-                        is Screen.Home -> HomeScreen(
-                            filter = homeFilter,
-                            onAdd = { defaultCategory ->
-                                screen = Screen.Edit(
-                                    itemId = null,
-                                    defaultCategory = defaultCategory,
-                                )
-                            },
-                            onOcr = { defaultCategory ->
-                                screen = Screen.PickImages(defaultCategory = defaultCategory)
-                            },
-                            onEdit = { id -> screen = Screen.Edit(id) },
-                            onSettings = { screen = Screen.Settings },
-                            onCategories = { screen = Screen.Categories },
-                            onSpaces = { screen = Screen.Spaces },
-                            onShare = { ids -> screen = Screen.Transfer(ids) },
-                        )
+                        is Screen.Home -> homeStateHolder.SaveableStateProvider(key = "home") {
+                            HomeScreen(
+                                filter = homeFilter,
+                                onAdd = { defaultCategory ->
+                                    screen = Screen.Edit(
+                                        itemId = null,
+                                        defaultCategory = defaultCategory,
+                                    )
+                                },
+                                onOcr = { defaultCategory ->
+                                    screen = Screen.PickImages(defaultCategory = defaultCategory)
+                                },
+                                onEdit = { id -> screen = Screen.Edit(id) },
+                                onSettings = { screen = Screen.Settings },
+                                onCategories = { screen = Screen.Categories },
+                                onSpaces = { screen = Screen.Spaces },
+                                onShare = { ids -> screen = Screen.Transfer(ids) },
+                            )
+                        }
                         is Screen.PickImages -> PickImagesScreen(
                             onBack = { screen = Screen.Home },
                             onConfirm = { uris ->
