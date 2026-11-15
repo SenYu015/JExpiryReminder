@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.2](https://github.com/nickynull/JExpiryReminder/compare/v1.9.1...v1.9.2) (2026-11-15)
+
+
+### Bug Fixes
+
+* 跨设备分享搜不到设备时不再静默失败 ([f1f7539](https://github.com/nickynull/JExpiryReminder/commit/f1f75394666fba218ee00cc152fc0a492b43877b))
+
 ## [1.9.1](https://github.com/nickynull/JExpiryReminder/compare/v1.9.0...v1.9.1) (2026-11-15)
 
 
