@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.1](https://github.com/nickynull/JExpiryReminder/compare/v1.9.0...v1.9.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* 从编辑页返回主页保留列表滚动位置 ([75ef308](https://github.com/nickynull/JExpiryReminder/commit/75ef308cbc8f65a87d34fb603c0fbac4ffd48359))
+
 ## [1.9.0](https://github.com/nickynull/JExpiryReminder/compare/v1.8.0...v1.9.0) (2026-11-14)
 
 
