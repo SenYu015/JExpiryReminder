@@ -1225,12 +1225,30 @@ private fun ItemRow(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text(
-                            item.name,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        )
+                        // 名称 + 数量：名称溢出时换行（最多 2 行，再长才省略），
+                        // 数量是不带 weight 的先测量子项，永远拿到自己的宽度，不会被名称挤掉；
+                        // 名称用 fill=false，短名称只占自身宽度，数量紧跟其后而不是被推到最右。
+                        Row(verticalAlignment = Alignment.Top) {
+                            Text(
+                                item.name,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.weight(1f, fill = false),
+                                maxLines = 2, overflow = TextOverflow.Ellipsis,
+                            )
+                            if (item.quantity > 1) {
+                                Spacer(Modifier.width(5.dp))
+                                Text(
+                                    "×${item.quantity}",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    // 与名称首行基线大致对齐（titleMedium 16sp vs bodyMedium 14sp）
+                                    modifier = Modifier.padding(top = 2.dp),
+                                )
+                            }
+                        }
                         // 备注：紧贴名称下方当副标题，只占一行，多行的数据压成单行后超出用省略号
                         val noteLine = item.note.trim().replace(SINGLE_LINE_WS, " ")
                         if (noteLine.isNotEmpty()) {
@@ -1269,11 +1287,10 @@ private fun ItemRow(
                                 )
                                 Spacer(Modifier.width(4.dp))
                             }
+                            // 「N 张图」放到右侧剩余天数下方；数量已挪到名称右边，这里都不再重复
                             val meta = buildList {
                                 add(store.categoryLabelOf(item.category))
                                 if (item.expireAt.isNotEmpty()) add(item.expireAt)
-                                if (item.quantity > 1) add("×${item.quantity}")
-                                if (item.images.isNotEmpty()) add("${item.images.size} 张图")
                             }
                             Text(
                                 meta.joinToString(" · "),
@@ -1298,19 +1315,6 @@ private fun ItemRow(
                             }
                         }
                     }
-                    // 图片缩略图：点击直接看大图（多张时在查看器里翻页）
-                    if (!selectMode && item.images.isNotEmpty()) {
-                        Spacer(Modifier.width(6.dp))
-                        Surface(
-                            onClick = onViewImages,
-                            shape = RoundedCornerShape(8.dp),
-                            border = androidx.compose.foundation.BorderStroke(
-                                1.dp, MaterialTheme.colorScheme.outline,
-                            ),
-                        ) {
-                            DataImage(item.images.first().path, 44.dp)
-                        }
-                    }
                     if (selectMode) {
                         Box(
                             Modifier
@@ -1331,13 +1335,44 @@ private fun ItemRow(
                                 Text("✓", color = Color.White, style = MaterialTheme.typography.labelSmall)
                             }
                         }
-                    } else if (item.expireAt.isNotEmpty()) {
-                        Text(
-                            Dates.describeRemaining(item.expireAt),
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = hexColor(status.color),
-                        )
+                    } else if (item.expireAt.isNotEmpty() || item.images.isNotEmpty()) {
+                        // 右列（自上而下）：剩余天数 → 「张数 + 缩略图」同一行
+                        Column(
+                            Modifier.padding(start = 8.dp),
+                            horizontalAlignment = Alignment.End,
+                        ) {
+                            if (item.expireAt.isNotEmpty()) {
+                                Text(
+                                    Dates.describeRemaining(item.expireAt),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = hexColor(status.color),
+                                )
+                            }
+                            if (item.images.isNotEmpty()) {
+                                Spacer(Modifier.height(4.dp))
+                                // 张数与缩略图同一行：张数在左、缩略图在右，保证缩略图与上方天数同一右边界
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        "${item.images.size} 张图",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                    // 缩略图：点击直接看大图（多张时在查看器里翻页）
+                                    Surface(
+                                        onClick = onViewImages,
+                                        shape = RoundedCornerShape(8.dp),
+                                        border = androidx.compose.foundation.BorderStroke(
+                                            1.dp, MaterialTheme.colorScheme.outline,
+                                        ),
+                                    ) {
+                                        DataImage(item.images.first().path, 44.dp)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
