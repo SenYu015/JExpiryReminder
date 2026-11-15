@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.0](https://github.com/nickynull/JExpiryReminder/compare/v1.9.2...v1.10.0) (2026-11-15)
+
+
+### Features
+
+* 主页卡片图文重新排版——数量贴名称、缩略图与张数并排到右列 ([835adf9](https://github.com/nickynull/JExpiryReminder/commit/835adf943c10ce60295cd5d330cdf0dd58311d9d))
+
 ## [1.9.2](https://github.com/nickynull/JExpiryReminder/compare/v1.9.1...v1.9.2) (2026-11-15)
 
 
