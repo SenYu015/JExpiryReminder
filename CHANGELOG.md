@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.14.0](https://github.com/nickynull/JExpiryReminder/compare/v1.13.0...v1.14.0) (2026-11-16)
+
+
+### Features
+
+* **ui:** 主页/设置视觉与交互重构，修复多处 UI 问题 ([c0513e8](https://github.com/nickynull/JExpiryReminder/commit/c0513e804f7217d6e0ffabc069900394fb10e3b1))
+
 ## [1.13.0](https://github.com/nickynull/JExpiryReminder/compare/v1.12.0...v1.13.0) (2026-11-16)
 
 
