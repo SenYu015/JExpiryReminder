@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.mapSaver
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -167,13 +168,20 @@ class MainActivity : ComponentActivity() {
                                 )
                             },
                         )
-                        is Screen.Edit -> EditScreen(
-                            itemId = s.itemId,
-                            defaultCategory = s.defaultCategory,
-                            defaultSpace = s.defaultSpace,
-                            prefill = s.prefill,
-                            onDone = { screen = Screen.Home },
-                        )
+                        // 按 itemId 分组：从「新增」切到「编辑某条已有物品」时仍停在同一个 when 分支、
+                        // 同一个调用点，不给 key 的话 Compose 会复用上页的组合状态，
+                        // 14 个 remember 字段的初值不会按新 existing 重新取，编辑页就会显示上一页的草稿。
+                        is Screen.Edit -> key(s.itemId ?: "new") {
+                            EditScreen(
+                                itemId = s.itemId,
+                                defaultCategory = s.defaultCategory,
+                                defaultSpace = s.defaultSpace,
+                                prefill = s.prefill,
+                                // 新增时点选「相似物品」里的某条，直接切到那一条的编辑页
+                                onEditExisting = { id -> screen = Screen.Edit(id) },
+                                onDone = { screen = Screen.Home },
+                            )
+                        }
                         is Screen.Settings -> SettingsScreen(
                             onBack = { screen = Screen.Home },
                             onTransfer = { screen = Screen.Transfer(emptyList()) },
