@@ -1,6 +1,7 @@
 package com.jimmy.expiryreminder
 
 import com.jimmy.expiryreminder.core.DATA_VERSION
+import com.jimmy.expiryreminder.core.ExpiryData
 import com.jimmy.expiryreminder.core.ExpiryItem
 import com.jimmy.expiryreminder.core.ShelfLifeUnit
 import org.json.JSONObject
@@ -47,7 +48,27 @@ class SyncIdCompatTest {
     }
 
     @Test
-    fun `数据版本已升到 v10`() {
-        assertEquals(10, DATA_VERSION)
+    fun `数据版本已升到 v11（含 syncId 与分类默认提醒）`() {
+        // v9 起 data.json 带 rev/revision 时钟，v10 加 syncId，
+        // 合并上游 v9「分类默认提醒」后用 v11 统一标记，避免与两侧历史版本号混淆
+        assertEquals(11, DATA_VERSION)
+    }
+
+    @Test
+    fun `合并后 revision 时钟与分类默认提醒能同时落盘`() {
+        val payload = ExpiryData(
+            version = DATA_VERSION,
+            items = listOf(item("s-unified")),
+            categories = emptyList(),
+            categoryColors = emptyMap(),
+            revision = 7L,
+            categoryRemindDefaults = mapOf("food" to listOf(3, 7)),
+        ).toJson()
+        assertEquals(7L, payload.getLong("revision"))
+        val defaults = payload.getJSONObject("categoryRemindDefaults")
+        assertEquals(2, defaults.getJSONArray("food").length())
+        assertEquals(3, defaults.getJSONArray("food").getInt(0))
+        // 单条记录自身的 rev 也不能被分类默认提醒字段挤掉
+        assertEquals(3L, payload.getJSONArray("items").getJSONObject(0).getLong("rev"))
     }
 }

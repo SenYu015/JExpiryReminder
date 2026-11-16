@@ -35,6 +35,8 @@ class ExpiryStore private constructor() {
         val spaceColors: Map<String, String> = emptyMap(),
         /** 本机全局修改时钟（Lamport）：所有物品 rev 的水位。 */
         val revision: Long = 0,
+        /** 各分类新增物品时预填的提前提醒天数（键 = 分类 id；没有键 = 无默认）。 */
+        val categoryRemindDefaults: Map<String, List<Int>> = emptyMap(),
     )
 
     private val _state = MutableStateFlow(State())
@@ -126,6 +128,33 @@ class ExpiryStore private constructor() {
     fun categoryLabelOf(id: String): String = categoryOf(id)?.label ?: id
 
     fun categoryColorOf(id: String): String = categoryOf(id)?.color ?: "#909399"
+
+    /**
+     * 该分类在「新增物品」时预填的提前提醒天数；没配置过返回空列表（= 不预选任何档位）。
+     * 只读取，不改写：旧数据没有这条记录时行为与历史版本一致。
+     */
+    fun defaultRemindDaysOf(categoryId: String): List<Int> =
+        _state.value.categoryRemindDefaults[categoryId] ?: emptyList()
+
+    /**
+     * 设置分类的默认提前提醒天数；传空列表表示「无默认」，直接把记录删掉而不是存空数组。
+     * 档位统一走 [normalizeRemindDays] 清洗（越界丢弃、去重、由远到近）。
+     */
+    suspend fun setCategoryRemindDefaults(
+        context: Context,
+        categoryId: String,
+        days: List<Int>,
+    ) {
+        if (categoryOf(categoryId) == null) return
+        val clean = normalizeRemindDays(days)
+        mutex.withLock {
+            val current = _state.value.categoryRemindDefaults
+            val next = if (clean.isEmpty()) current - categoryId else current + (categoryId to clean)
+            if (next == current) return
+            _state.value = _state.value.copy(categoryRemindDefaults = next)
+            persistLocked(context)
+        }
+    }
 
     // ---------------------------------------------------------------- 空间
 
@@ -276,12 +305,30 @@ class ExpiryStore private constructor() {
             }
 
             // 分类顺序：只留已知分类 id，去重后保序（脏数据不会把顺序弄乱）
+            val knownIds = Categories.BUILTIN.map { it.id }.toSet() + categories.map { it.id }
             val order = LinkedHashSet<String>()
             stored?.optJSONArray("categoryOrder")?.let { arr ->
-                val known = Categories.BUILTIN.map { it.id }.toSet() + categories.map { it.id }
                 for (i in 0 until arr.length()) {
                     val id = arr.opt(i) as? String ?: continue
-                    if (id in known) order.add(id)
+                    if (id in knownIds) order.add(id)
+                }
+            }
+
+            // 分类默认提前提醒天数：只留已知分类 id + 合法档位；脏键、空档位直接丢掉，不写回
+            val remindDefaults = LinkedHashMap<String, List<Int>>()
+            stored?.optJSONObject("categoryRemindDefaults")?.let { obj ->
+                for (key in obj.keys()) {
+                    if (key !in knownIds) continue
+                    val arr = obj.optJSONArray(key) ?: continue
+                    val days = (0 until arr.length()).mapNotNull { i ->
+                        when (val v = arr.opt(i)) {
+                            is Number -> v.toInt()
+                            is String -> v.toIntOrNull()
+                            else -> null
+                        }
+                    }
+                    val clean = normalizeRemindDays(days)
+                    if (clean.isNotEmpty()) remindDefaults[key] = clean
                 }
             }
 
@@ -314,6 +361,7 @@ class ExpiryStore private constructor() {
                 spaces = spaces.values.toList(),
                 spaceColors = spaceColors,
                 revision = stored?.optLong("revision", 0L) ?: 0L,
+                categoryRemindDefaults = remindDefaults,
             )
             // 以当前内容作为「已落盘」基线，首次写入不会把全部老数据误判成新修改
             lastHashes.clear()
@@ -384,6 +432,7 @@ class ExpiryStore private constructor() {
             spaces = next.spaces,
             spaceColors = next.spaceColors,
             revision = next.revision,
+            categoryRemindDefaults = next.categoryRemindDefaults,
         )
         file.writeText(payload.toJson().toString(2))
     }
@@ -715,7 +764,11 @@ class ExpiryStore private constructor() {
             val list = _state.value.categories.filter { it.id != id }
             ok = list.size != _state.value.categories.size
             if (ok) {
-                _state.value = _state.value.copy(categories = list)
+                // 分类没了，它的默认提醒天数也一并清掉，避免留脏记录
+                _state.value = _state.value.copy(
+                    categories = list,
+                    categoryRemindDefaults = _state.value.categoryRemindDefaults - id,
+                )
                 persistLocked(context)
             }
         }
@@ -886,21 +939,26 @@ class ExpiryStore private constructor() {
     }
 
     /**
-     * 删除空间：空间下还有物品（含已归档）时拒绝，返回 false。
-     * 物品不会因为删空间被连带删除——必须先转移或删除，避免误伤数据。
+     * 删除空间：空间本身移除，空间下的物品一律不删——只把它们的 spaceId 清空，
+     * 变成「未分配」（含已归档物品，避免盘里留下指向已删空间的死 id）。
+     * 返回被改成「未分配」的物品数；空间不存在时返回 null。
      */
-    suspend fun removeSpace(context: Context, id: String): Boolean {
-        var ok = false
-        mutex.withLock {
-            if (_state.value.items.any { it.spaceId == id }) return false
-            val list = _state.value.spaces.filter { it.id != id }
-            ok = list.size != _state.value.spaces.size
-            if (ok) {
-                _state.value = _state.value.copy(spaces = list)
-                persistLocked(context)
+    suspend fun removeSpace(context: Context, id: String): Int? = mutex.withLock {
+        val current = _state.value
+        val list = current.spaces.filter { it.id != id }
+        if (list.size == current.spaces.size) return@withLock null
+        var moved = 0
+        val items = current.items.map { item ->
+            if (item.spaceId == id) {
+                moved++
+                item.copy(spaceId = "")
+            } else {
+                item
             }
         }
-        return ok
+        _state.value = current.copy(spaces = list, items = items)
+        persistLocked(context)
+        moved
     }
 
     // ------------------------------------------------------------- reminders

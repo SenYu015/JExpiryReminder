@@ -116,7 +116,7 @@ fun SpaceScreen(onBack: () -> Unit) {
         ) {
             Text(
                 "点整行改名，点左侧圆点换颜色（「全部空间」「未分配」也能换）；"
-                    + "空间下还有物品时不能删除，先把物品移到别的空间",
+                    + "删除空间不会删除物品，空间里的物品会变成「未分配」",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 2.dp, bottom = 10.dp),
@@ -133,18 +133,7 @@ fun SpaceScreen(onBack: () -> Unit) {
                         usage = store.itemCountInSpace(space.id),
                         onPickColor = { colorFor = space },
                         onRename = { renameFor = space },
-                        onDelete = {
-                            val usage = store.itemCountInSpace(space.id)
-                            if (usage > 0) {
-                                Toast.makeText(
-                                    context,
-                                    "「${space.label}」下还有 $usage 件物品，先移走再删除",
-                                    Toast.LENGTH_SHORT,
-                                ).show()
-                            } else {
-                                pendingDelete = space
-                            }
-                        },
+                        onDelete = { pendingDelete = space },
                     )
                 }
 
@@ -246,19 +235,32 @@ fun SpaceScreen(onBack: () -> Unit) {
     }
 
     pendingDelete?.let { space ->
+        val usage = store.itemCountInSpace(space.id)
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
             title = { Text("删除空间") },
-            text = { Text("确定删除「${space.label}」吗？空间里的物品不会受影响（空空间才能删）。") },
+            text = {
+                Text(
+                    if (usage > 0) {
+                        "删除「${space.label}」后，空间里的 $usage 件物品不会被删除，" +
+                            "只会变成「未分配」，之后仍可在首页和「未分配」里找到。确定删除？"
+                    } else {
+                        "确定删除「${space.label}」吗？"
+                    },
+                )
+            },
             confirmButton = {
                 TextButton(onClick = {
                     val target = space
                     pendingDelete = null
                     scope.launch {
-                        val ok = store.removeSpace(context, target.id)
-                        if (!ok) {
-                            Toast.makeText(context, "删除失败：空间下还有物品", Toast.LENGTH_SHORT).show()
+                        val moved = store.removeSpace(context, target.id)
+                        val message = when {
+                            moved == null -> "「${target.label}」已不存在"
+                            moved == 0 -> "已删除「${target.label}」"
+                            else -> "已删除「${target.label}」，$moved 件物品已移到未分配"
                         }
+                        Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
                     }
                 }) { Text("删除", color = MaterialTheme.colorScheme.error) }
             },
@@ -370,9 +372,8 @@ private fun SpaceRow(
             IconButton(onClick = onDelete) {
                 Icon(
                     Icons.Filled.Close,
-                    contentDescription = if (usage > 0) "空间下有物品，不能删除" else "删除空间",
-                    tint = if (usage > 0) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
-                    else MaterialTheme.colorScheme.error,
+                    contentDescription = "删除空间",
+                    tint = MaterialTheme.colorScheme.error,
                     modifier = Modifier.size(18.dp),
                 )
             }

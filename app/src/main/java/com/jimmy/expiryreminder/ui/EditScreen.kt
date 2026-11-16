@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -51,7 +52,6 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -96,6 +96,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -110,6 +111,7 @@ import com.jimmy.expiryreminder.core.ExpiryItem
 import com.jimmy.expiryreminder.core.ExpiryStore
 import com.jimmy.expiryreminder.core.ImageStore
 import com.jimmy.expiryreminder.core.MAX_IMAGES
+import com.jimmy.expiryreminder.core.NameSimilarity
 import com.jimmy.expiryreminder.ocr.DateCandidate
 import com.jimmy.expiryreminder.ocr.DateExtractor
 import com.jimmy.expiryreminder.ocr.DateRole
@@ -119,16 +121,14 @@ import com.jimmy.expiryreminder.ocr.OcrEngine
 import com.jimmy.expiryreminder.ocr.PrefillDraft
 import com.jimmy.expiryreminder.ocr.ResultMerger
 import com.jimmy.expiryreminder.ocr.ShelfLifeCandidate
-import com.jimmy.expiryreminder.core.REMIND_DAY_MAX
-import com.jimmy.expiryreminder.core.REMIND_DAY_OPTIONS
 import com.jimmy.expiryreminder.core.ShelfLifeUnit
 import com.jimmy.expiryreminder.core.VoiceText
 import com.jimmy.expiryreminder.core.label
 import com.jimmy.expiryreminder.core.normalizeImagePath
 import com.jimmy.expiryreminder.core.normalizeRemindDays
-import com.jimmy.expiryreminder.core.remindDayLabel
 import com.jimmy.expiryreminder.core.uid
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -146,6 +146,8 @@ fun EditScreen(
     defaultSpace: String? = null,
     /** 识别预填结果；纯手动新增时为 null。 */
     prefill: PrefillDraft? = null,
+    /** 新增时名称撞到已有物品，用户在相似列表里点选后跳去编辑那一条。 */
+    onEditExisting: (String) -> Unit = {},
     onDone: () -> Unit,
     /** 保存/删除成功后退出：不应模拟「返回手势」，走平台式淡入淡出。 */
     onSaved: (() -> Unit)? = null,
@@ -201,7 +203,12 @@ fun EditScreen(
             }
         )
     }
-    var remindDays by remember { mutableStateOf(existing?.remindDays ?: emptyList()) }
+    // 新增物品时预填该分类的默认提前提醒天数；编辑已有物品永远用物品自己的设置
+    var remindDays by remember {
+        mutableStateOf(existing?.remindDays ?: store.defaultRemindDaysOf(category))
+    }
+    // 用户是否手动改过提醒档位：没改过时，新增页切换分类会跟着换成新分类的默认值
+    var remindTouched by remember { mutableStateOf(false) }
     var quantity by remember { mutableStateOf(existing?.quantity ?: 1) }
     var note by remember { mutableStateOf(existing?.note ?: "") }
     var images by remember { mutableStateOf(existing?.images ?: prefill?.images ?: emptyList()) }
@@ -210,6 +217,22 @@ fun EditScreen(
     var customDayDialog by remember { mutableStateOf(false) }
     // 正在查看的图片下标：null = 查看器未打开
     var viewerIndex by remember { mutableStateOf<Int?>(null) }
+
+    // ---------------------------------------------- 相似物品（防重复录入）
+    // 只在新增模式检索：编辑已有物品时改名撞到别人，不算「重复录入」，不该打扰。
+    var similarMatches by remember { mutableStateOf<List<NameSimilarity.Match>>(emptyList()) }
+    var similarDialog by remember { mutableStateOf(false) }
+    LaunchedEffect(name) {
+        if (existing != null ||
+            NameSimilarity.normalize(name).length < NameSimilarity.MIN_QUERY_LENGTH
+        ) {
+            similarMatches = emptyList()
+            return@LaunchedEffect
+        }
+        // 逐字输入时每敲一下都全量比对没有意义，停手 350ms 再查一次
+        delay(350)
+        similarMatches = NameSimilarity.findSimilar(store.activeItems(), name)
+    }
 
     // 识别徽标：用户在这些字段上产生任何手动输入后，对应徽标就该消失
     var nameFromOcr by remember { mutableStateOf(prefill?.name?.isNotEmpty() == true) }
@@ -514,7 +537,25 @@ fun EditScreen(
                     FormCard {
                         EditSectionHeader("基本信息", "名称、空间与分类")
                         // -------------------------------------- 物品名称
-                        FieldLabel("物品名称", ocrBadge = nameFromOcr)
+                        // 标签行右侧挂相似物品徽标：输入框内右侧已被「清空 ×」占着，
+                        // 两个小按钮并排容易误触，所以挪到框外标签行右端。
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            FieldLabel("物品名称", ocrBadge = nameFromOcr)
+                            if (similarMatches.isNotEmpty()) {
+                                Spacer(Modifier.weight(1f))
+                                SimilarNameBadge(
+                                    count = similarMatches.size,
+                                    sameName = similarMatches.any { it.sameName },
+                                    onClick = {
+                                        focusManager.clearFocus()
+                                        similarDialog = true
+                                    },
+                                )
+                            }
+                        }
                         InputBox(
                             value = name,
                             onValueChange = { name = it; nameFromOcr = false },
@@ -683,6 +724,10 @@ fun EditScreen(
                                                     category = cat.id
                                                     categoryMenu = false
                                                     categoryFromOcr = false
+                                                    // 新增物品且用户还没手动挑过档位：跟随分类换成它的默认值
+                                                    if (existing == null && !remindTouched) {
+                                                        remindDays = store.defaultRemindDaysOf(cat.id)
+                                                    }
                                                 },
                                             )
                                         }
@@ -862,53 +907,15 @@ fun EditScreen(
 
                         // -------------------------------------- 提前提醒
                         FieldLabel("提前提醒")
-                        // 预设档位之外的用户自填天数：与预设一起按由远到近排，「当天」固定收尾
-                        val customRemindDays =
-                            remindDays.filter { it !in REMIND_DAY_OPTIONS }.sortedDescending()
-                        val remindChips =
-                            (REMIND_DAY_OPTIONS.filter { it > 0 } + customRemindDays)
-                                .sortedDescending() + REMIND_DAY_OPTIONS.filter { it == 0 }
-                        FlowRow(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalArrangement = Arrangement.spacedBy(2.dp),
-                        ) {
-                            for (day in remindChips) {
-                                val selectedDay = day in remindDays
-                                FilterChip(
-                                    selected = selectedDay,
-                                    onClick = {
-                                        remindDays =
-                                            if (day in remindDays) remindDays - day else remindDays + day
-                                    },
-                                    label = { Text(remindDayLabel(day)) },
-                                    modifier = Modifier.height(30.dp),
-                                    trailingIcon = if (selectedDay) {
-                                        {
-                                            Icon(
-                                                Icons.Filled.Close,
-                                                contentDescription = "移除",
-                                                modifier = Modifier.size(13.dp),
-                                            )
-                                        }
-                                    } else null,
-                                )
-                            }
-                            // 自定义入口：录入 1~365 天，确认后作为一枚档位加入
-                            FilterChip(
-                                selected = false,
-                                onClick = { customDayDialog = true },
-                                label = { Text("自定义") },
-                                modifier = Modifier.height(30.dp),
-                                leadingIcon = {
-                                    Icon(
-                                        Icons.Filled.Add,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(14.dp),
-                                    )
-                                },
-                            )
-                        }
+                        RemindDayChips(
+                            selected = remindDays,
+                            onToggle = { day ->
+                                remindTouched = true
+                                remindDays =
+                                    if (day in remindDays) remindDays - day else remindDays + day
+                            },
+                            onCustom = { customDayDialog = true },
+                        )
                         if (remindDays.isEmpty()) {
                             Text(
                                 "未选择则不推送到期提醒",
@@ -1253,11 +1260,26 @@ fun EditScreen(
         )
     }
 
+    // 相似物品：只提示不阻断——同款不同批次（两箱同品牌牛奶）确实可能各录一条
+    if (similarDialog && similarMatches.isNotEmpty()) {
+        SimilarItemsDialog(
+            matches = similarMatches,
+            store = store,
+            onEdit = { id ->
+                similarDialog = false
+                focusManager.clearFocus()
+                onEditExisting(id)
+            },
+            onDismiss = { similarDialog = false },
+        )
+    }
+
     // 自定义提前天数：确认后并入档位（越界/重复在弹窗内拦下）
     if (customDayDialog) {
         CustomRemindDayDialog(
             remindDays = remindDays,
             onConfirm = { day ->
+                remindTouched = true
                 remindDays = normalizeRemindDays(remindDays + day)
                 customDayDialog = false
             },
@@ -1329,77 +1351,165 @@ private fun FieldLabel(text: String, optional: Boolean = false, ocrBadge: Boolea
 }
 
 /**
- * 自定义提前天数弹窗：只收 1~[REMIND_DAY_MAX] 的正整数，越界与重复档位在弹窗内就地拦下，
- * 免得加进档位后才发现「填了也不生效」。
+ * 相似物品徽标：挂在「物品名称」标签行右端。
+ *
+ * 只在名称够长、且真的查到相似项时才出现；同名用错误色（大概率是重复录入），
+ * 只是相似用第三色（可能是同款不同批次，未必是错）。
  */
 @Composable
-private fun CustomRemindDayDialog(
-    remindDays: List<Int>,
-    onConfirm: (Int) -> Unit,
+private fun SimilarNameBadge(count: Int, sameName: Boolean, onClick: () -> Unit) {
+    val accent = if (sameName) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.tertiary
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(50))
+            .background(accent.copy(alpha = 0.14f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 9.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            if (sameName) "同名 $count 个" else "相似 $count 个",
+            style = MaterialTheme.typography.labelSmall,
+            color = accent,
+            fontWeight = FontWeight.Medium,
+        )
+    }
+}
+
+/**
+ * 相似物品弹窗：按相似度排序的候选列表，点一条直接去编辑它。
+ *
+ * 保留「继续新增」而不是只给「确定」：同款第二箱牛奶本来就该单独录，
+ * 这里只是提醒，不能替用户做决定。
+ */
+@Composable
+private fun SimilarItemsDialog(
+    matches: List<NameSimilarity.Match>,
+    store: ExpiryStore,
+    onEdit: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    var text by remember { mutableStateOf("") }
-    var error by remember { mutableStateOf<String?>(null) }
-    val focus = remember { FocusRequester() }
-    LaunchedEffect(Unit) {
-        // 等输入框挂到树上再收焦点，否则键盘不弹
-        withFrameNanos { }
-        focus.requestFocus()
-    }
-
-    fun submit() {
-        val day = text.toIntOrNull()
-        val message = when {
-            text.isEmpty() -> "请输入天数"
-            day == null -> "请输入数字"
-            else -> when {
-                day < 1 -> "天数需大于 0"
-                day > REMIND_DAY_MAX -> "最多提前 $REMIND_DAY_MAX 天"
-                day in remindDays -> "已添加该档位"
-                else -> null
-            }
-        }
-        error = message
-        if (message == null && day != null) onConfirm(day)
-    }
-
-    val errorText = error
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("自定义提前天数") },
-        text = {
-            Column {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            tonalElevation = 4.dp,
+        ) {
+            Column(Modifier.padding(16.dp)) {
                 Text(
-                    "到期前第几天提醒，可填 1~$REMIND_DAY_MAX 天。",
-                    style = MaterialTheme.typography.bodySmall,
+                    "已有 ${matches.size} 个相似物品",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    "按名称相似度排序，点一条去编辑它",
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(10.dp))
-                InputBox(
-                    value = text,
-                    onValueChange = {
-                        text = it.filter { c -> c.isDigit() }.take(3)
-                        error = null
-                    },
-                    placeholder = "例如 45",
-                    fixedHeight = 48.dp,
-                    focusRequester = focus,
-                    isError = errorText != null,
-                    modifier = Modifier.fillMaxWidth(),
+                Column(
+                    Modifier
+                        .heightIn(max = 380.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    for (match in matches) {
+                        SimilarItemRow(
+                            match = match,
+                            store = store,
+                            onClick = { onEdit(match.item.id) },
+                        )
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "点选后将打开该物品，本次新增不会保存",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                if (errorText != null) {
-                    Spacer(Modifier.height(6.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onDismiss) { Text("继续新增") }
+                }
+            }
+        }
+    }
+}
+
+/** 相似物品列表的一行：名称 + 分类色点 + 空间 + 到期日 + 状态。 */
+@Composable
+private fun SimilarItemRow(
+    match: NameSimilarity.Match,
+    store: ExpiryStore,
+    onClick: () -> Unit,
+) {
+    val item = match.item
+    val status = store.statusOf(item)
+    val spaceId = store.resolveSpaceId(item.spaceId)
+    // 未分配空间时整段不提空间，与主页卡片一致（不显示默认态）
+    val meta = buildList {
+        add(store.categoryLabelOf(item.category))
+        if (spaceId.isNotEmpty()) add(store.spaceLabelOf(spaceId))
+        add(item.expireAt.ifEmpty { "未设到期日" })
+    }.joinToString(" · ")
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp, MaterialTheme.colorScheme.outline,
+        ),
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+    ) {
+        Column(
+            Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    item.name,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                if (match.sameName) {
+                    Spacer(Modifier.width(6.dp))
                     Text(
-                        errorText,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
+                        "同名",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(MaterialTheme.colorScheme.errorContainer)
+                            .padding(horizontal = 5.dp, vertical = 1.dp),
                     )
                 }
             }
-        },
-        confirmButton = { TextButton(onClick = { submit() }) { Text("添加") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
-    )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier
+                        .size(8.dp)
+                        .background(hexColor(store.categoryColorOf(item.category)), CircleShape),
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    meta,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    status.label,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = hexColor(status.color),
+                )
+            }
+        }
+    }
 }
 
 /**

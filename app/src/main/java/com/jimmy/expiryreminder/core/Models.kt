@@ -432,6 +432,11 @@ data class ExpiryData(
     val spaceColors: Map<String, String> = emptyMap(),
     /** 本机全局修改时钟：所有物品 rev 的最大值水位，随 data.json 一起落盘。 */
     val revision: Long = 0,
+    /**
+     * 每种分类在「新增物品」时预填的提前提醒天数（键 = 分类 id）。
+     * 没有登记的键表示该分类无默认值，新增物品时不预选任何档位。
+     */
+    val categoryRemindDefaults: Map<String, List<Int>> = emptyMap(),
 ) {
     fun toJson(): JSONObject {
         val colors = JSONObject()
@@ -440,6 +445,8 @@ data class ExpiryData(
         for ((k, v) in categoryLabels) labels.put(k, v)
         val spaceColorJson = JSONObject()
         for ((k, v) in spaceColors) spaceColorJson.put(k, v)
+        val remindDefaults = JSONObject()
+        for ((k, v) in categoryRemindDefaults) remindDefaults.put(k, JSONArray(v))
         return JSONObject()
             .put("version", version)
             .put("items", JSONArray(items.map { it.toJson() }))
@@ -450,11 +457,20 @@ data class ExpiryData(
             .put("spaces", JSONArray(spaces.map { it.toJson() }))
             .put("spaceColors", spaceColorJson)
             .put("revision", revision)
+            .put("categoryRemindDefaults", remindDefaults)
     }
 }
 
-/** data.json 当前版本：v4 图片改文件相对路径；v5 分类颜色可编辑；v6 物品归属空间；v7 空间颜色可编辑；v8 去掉内置默认空间；v9 增加 rev 修改标记与顶层 revision 时钟；v10 增加 syncId 共同唯一 ID（旧数据缺字段按空读取，首次落盘由 id 派生补发）。 */
-const val DATA_VERSION = 10
+/**
+ * data.json 当前版本：v4 图片改文件相对路径；v5 分类颜色可编辑；v6 物品归属空间；
+ * v7 空间颜色可编辑；v8 去掉内置默认空间（未维护的空间读取时视为未分配，不改写历史数据）；
+ * v9 增加 rev 修改标记与顶层 revision 时钟且分类可设默认提前提醒天数（缺该键即无默认，
+ * 不做迁移、不改写历史数据）；v10 增加 syncId 共同唯一 ID（旧数据缺字段按空读取，首次落盘由 id 派生补发）。
+ *
+ * 注：v9 在本分支同时承载「rev/revision 时钟」与「分类默认提醒」两项上游先后引入的语义，
+ * 因 DATA_VERSION 仅作落盘标记、不参与读取分支判断，合并后统一记为 v11 以区别于两侧历史版本。
+ */
+const val DATA_VERSION = 11
 
 // ---------------------------------------------------------------- 状态
 

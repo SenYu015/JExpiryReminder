@@ -15,23 +15,27 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -56,12 +60,12 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
@@ -72,10 +76,11 @@ import com.jimmy.expiryreminder.core.Categories
 import com.jimmy.expiryreminder.core.CategoryDef
 import com.jimmy.expiryreminder.core.CategoryNameError
 import com.jimmy.expiryreminder.core.ExpiryStore
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
+import com.jimmy.expiryreminder.core.remindDaysSummary
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 
 /** 每行固定高度（拖动位移换算靠它，各行等高才能按跨行判断）。 */
 private val ROW_HEIGHT = 56.dp
@@ -107,6 +112,9 @@ fun CategoryScreen(onBack: () -> Unit) {
     var colorFor by remember { mutableStateOf<String?>(null) }
     var pendingDelete by remember { mutableStateOf<CategoryDef?>(null) }
     var renameFor by remember { mutableStateOf<CategoryDef?>(null) }
+    // 分类默认提前提醒：先弹分类清单，选中某一行再进档位选择弹窗
+    var remindListOpen by remember { mutableStateOf(false) }
+    var remindFor by remember { mutableStateOf<CategoryDef?>(null) }
     // 新增成功后滚到新行，确认「加进去了」
     var scrollToNew by remember { mutableStateOf(false) }
 
@@ -142,6 +150,14 @@ fun CategoryScreen(onBack: () -> Unit) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
                 },
+                actions = {
+                    IconButton(onClick = { remindListOpen = true }) {
+                        Icon(
+                            Icons.Filled.Notifications,
+                            contentDescription = "分类默认提醒",
+                        )
+                    }
+                },
             )
         },
     ) { padding ->
@@ -152,7 +168,7 @@ fun CategoryScreen(onBack: () -> Unit) {
                 .imePadding(),
         ) {
             Text(
-                "长按分类可拖动排序；点整行改名，点左侧圆点换颜色",
+                "长按分类可拖动排序；点整行改名，点左侧圆点换颜色；右上角设新增时的默认提醒",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 2.dp, bottom = 10.dp),
@@ -258,6 +274,81 @@ fun CategoryScreen(onBack: () -> Unit) {
                 colorFor = null
             },
             onDismiss = { colorFor = null },
+        )
+    }
+
+    // 分类清单：一行一个分类，右侧显示当前的默认提前提醒摘要，点进去改档位
+    if (remindListOpen) {
+        val listScroll = rememberScrollState()
+        AlertDialog(
+            onDismissRequest = { remindListOpen = false },
+            title = { Text("分类默认提醒") },
+            text = {
+                Column(
+                    Modifier
+                        .heightIn(max = 380.dp)
+                        .verticalScroll(listScroll),
+                ) {
+                    Text(
+                        "新增物品时会按所选分类预填这些提前天数，保存后仍可在物品里单独改。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    for (cat in options) {
+                        val days = store.defaultRemindDaysOf(cat.id)
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable {
+                                    remindListOpen = false
+                                    remindFor = cat
+                                }
+                                .padding(horizontal = 4.dp, vertical = 11.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Box(
+                                Modifier
+                                    .size(10.dp)
+                                    .clip(CircleShape)
+                                    .background(hexColor(cat.color)),
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                cat.label,
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Text(
+                                remindDaysSummary(days) ?: "无默认",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (days.isEmpty()) MaterialTheme.colorScheme.onSurfaceVariant
+                                else MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { remindListOpen = false }) { Text("完成") }
+            },
+        )
+    }
+
+    remindFor?.let { cat ->
+        RemindDayPickerDialog(
+            title = "「${cat.label}」默认提醒",
+            subtitle = "新增该分类的物品时自动勾选这些天数；全不选表示不预选档位。",
+            initial = store.defaultRemindDaysOf(cat.id),
+            onConfirm = { days ->
+                scope.launch { store.setCategoryRemindDefaults(context, cat.id, days) }
+                remindFor = null
+            },
+            onDismiss = { remindFor = null },
         )
     }
 
