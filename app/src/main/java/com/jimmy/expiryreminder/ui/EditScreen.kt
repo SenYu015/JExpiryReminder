@@ -3,6 +3,7 @@
 
 package com.jimmy.expiryreminder.ui
 
+import android.app.Activity
 import android.graphics.DashPathEffect
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -50,9 +52,11 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarDuration
@@ -87,6 +91,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -96,6 +101,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.zIndex
+import com.jimmy.expiryreminder.R
 import com.jimmy.expiryreminder.core.Categories
 import com.jimmy.expiryreminder.core.Dates
 import com.jimmy.expiryreminder.core.ExpiryCalc
@@ -116,6 +122,7 @@ import com.jimmy.expiryreminder.ocr.ShelfLifeCandidate
 import com.jimmy.expiryreminder.core.REMIND_DAY_MAX
 import com.jimmy.expiryreminder.core.REMIND_DAY_OPTIONS
 import com.jimmy.expiryreminder.core.ShelfLifeUnit
+import com.jimmy.expiryreminder.core.VoiceText
 import com.jimmy.expiryreminder.core.label
 import com.jimmy.expiryreminder.core.normalizeImagePath
 import com.jimmy.expiryreminder.core.normalizeRemindDays
@@ -140,7 +147,10 @@ fun EditScreen(
     /** 识别预填结果；纯手动新增时为 null。 */
     prefill: PrefillDraft? = null,
     onDone: () -> Unit,
+    /** 保存/删除成功后退出：不应模拟「返回手势」，走平台式淡入淡出。 */
+    onSaved: (() -> Unit)? = null,
 ) {
+    val finish = onSaved ?: onDone
     val context = LocalContext.current
     val store = ExpiryStore.get()
     val scope = rememberCoroutineScope()
@@ -229,6 +239,53 @@ fun EditScreen(
     fun showError(msg: String) = showMessage(msg, isError = true)
     fun showInfo(msg: String) = showMessage(msg, isError = false)
     val scrollState = rememberScrollState()
+
+    // 本机语音：优先 Android 端侧识别（createOnDeviceSpeechRecognizer），
+    // 没有端侧引擎时用系统识别器 + 离线偏好；两条路径都需要 RECORD_AUDIO。
+    val voiceCanUse = remember { VoiceInput.canUse(context) }
+    var voiceDialogTarget by remember { mutableStateOf<String?>(null) } // name / note / quick
+    var pendingVoiceTarget by remember { mutableStateOf("name") }
+    val recordAudioPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) voiceDialogTarget = pendingVoiceTarget
+        else showError("需要麦克风权限才能语音输入")
+    }
+    fun startVoice(target: String) {
+        if (!voiceCanUse) {
+            showError("本机没有可用的语音引擎，可到系统设置下载离线语音包")
+            return
+        }
+        pendingVoiceTarget = target
+        val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+            context, android.Manifest.permission.RECORD_AUDIO,
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (granted) voiceDialogTarget = target
+        else recordAudioPermission.launch(android.Manifest.permission.RECORD_AUDIO)
+    }
+    fun applySpoken(spoken: String) {
+        when (voiceDialogTarget) {
+            "name" -> {
+                name = spoken.take(60)
+                nameFromOcr = false
+            }
+            "note" -> note = (if (note.isBlank()) spoken else "$note $spoken").take(MAX_NOTE)
+            "quick" -> {
+                val quick = VoiceText.parseQuickRecord(spoken)
+                if (quick.name.isNotBlank()) {
+                    name = quick.name
+                    nameFromOcr = false
+                }
+                if (quick.expireAt.isNotBlank()) {
+                    expireAt = quick.expireAt
+                    manualExpire = true
+                    expireFromOcr = false
+                }
+                if (quick.note.isNotBlank()) note = quick.note.take(MAX_NOTE)
+                showInfo("已按「$spoken」生成草稿，请核对后保存")
+            }
+        }
+    }
 
     // 新增时自动聚焦名称输入框并弹出键盘，省掉一次点击。
     // 识别预填进来时字段已有值，此时弹键盘会直接盖住识别结果与候选区，所以跳过。
@@ -406,7 +463,7 @@ fun EditScreen(
                     Modifier
                         .fillMaxWidth()
                         .statusBarsPadding()
-                        .padding(start = 2.dp, end = 2.dp, top = 4.dp, bottom = 4.dp),
+                        .padding(start = 8.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     IconButton(onClick = onDone, modifier = Modifier.size(40.dp)) {
@@ -424,6 +481,14 @@ fun EditScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
+                    // 新增时把「语音快速录入」放在标题栏，避免和名称框的麦克风挤在一起
+                    if (existing == null) {
+                        MicIconButton(
+                            onClick = { startVoice("quick") },
+                            enabled = voiceCanUse,
+                            description = "语音快速录入",
+                        )
+                    }
                     if (existing != null) {
                         IconButton(onClick = { confirmDelete = true }, modifier = Modifier.size(40.dp)) {
                             Icon(Icons.Filled.Close, contentDescription = "删除", tint = MaterialTheme.colorScheme.error)
@@ -436,32 +501,78 @@ fun EditScreen(
                 Modifier
                     .weight(1f)
                     .verticalScroll(scrollState)
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
             ) {
                 // ============================================== 表单大卡（白底页面靠描边区分）
-                Surface(
-                    shape = RoundedCornerShape(16.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    border = androidx.compose.foundation.BorderStroke(
-                        1.dp, MaterialTheme.colorScheme.outline,
-                    ),
-                    modifier = Modifier.fillMaxWidth(),
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = 640.dp)
+                        .align(Alignment.CenterHorizontally),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    Column(
-                        Modifier.fillMaxWidth().padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp),
-                    ) {
+                    FormCard {
+                        EditSectionHeader("基本信息", "名称、空间与分类")
                         // -------------------------------------- 物品名称
                         FieldLabel("物品名称", ocrBadge = nameFromOcr)
                         InputBox(
                             value = name,
                             onValueChange = { name = it; nameFromOcr = false },
                             placeholder = "如：维生素 C、护照、牛奶",
-                            fixedHeight = 48.dp,
+                            fixedHeight = 52.dp,
                             modifier = Modifier.fillMaxWidth(),
                             focusRequester = nameFocus,
                             showClear = true,
+                            trailing = {
+                                MicIconButton(
+                                    onClick = { startVoice("name") },
+                                    enabled = voiceCanUse,
+                                    description = "语音输入名称",
+                                )
+                            },
                         )
+
+                        // 识别原文：离线 OCR 不准时可逐行核对，点一行补进备注
+                        val rawLines = prefill?.rawLines.orEmpty()
+                        if (rawLines.isNotEmpty()) {
+                            var showRaw by remember { mutableStateOf(false) }
+                            TextButton(onClick = { showRaw = !showRaw }) {
+                                Text(
+                                    if (showRaw) "收起识别原文（${rawLines.size} 行）"
+                                    else "查看识别原文（${rawLines.size} 行）",
+                                )
+                            }
+                            if (showRaw) {
+                                Column(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .background(
+                                            MaterialTheme.colorScheme.surfaceVariant,
+                                            RoundedCornerShape(8.dp),
+                                        )
+                                        .padding(8.dp),
+                                ) {
+                                    rawLines.forEach { line ->
+                                        Text(
+                                            line,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable {
+                                                    note = (if (note.isBlank()) line else "$note $line")
+                                                        .take(MAX_NOTE)
+                                                }
+                                                .padding(vertical = 3.dp),
+                                        )
+                                    }
+                                    Text(
+                                        "点任意一行可追加到备注",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
 
                         // 品名候选：文字长，用竖排单选而不是横排 chip
                         if (nameCandidates.size >= 2) {
@@ -607,6 +718,10 @@ fun EditScreen(
                                 },
                             )
                         }
+                    }
+
+                    FormCard {
+                        EditSectionHeader("日期与数量", "到期日期可由生产日期与有效期推算")
 
                         // -------------------------------------- 生产日期 / 有效期 / 单位
                         // 外层按左右两半分：生产日期占左半（与到期日期对齐），
@@ -642,7 +757,7 @@ fun EditScreen(
                                                 shelfLifeFromOcr = false
                                             },
                                             placeholder = "选填",
-                                            fixedHeight = 48.dp,
+                                            fixedHeight = 52.dp,
                                             modifier = Modifier.fillMaxWidth(),
                                             showClear = true,
                                             keyboardType = KeyboardType.Number,
@@ -740,6 +855,10 @@ fun EditScreen(
                                 )
                             }
                         }
+                    }
+
+                    FormCard {
+                        EditSectionHeader("提醒与补充")
 
                         // -------------------------------------- 提前提醒
                         FieldLabel("提前提醒")
@@ -804,8 +923,16 @@ fun EditScreen(
                             value = note,
                             onValueChange = { note = it.take(MAX_NOTE) },
                             placeholder = "存放位置、开封日期等",
+                            fixedHeight = 52.dp,
                             modifier = Modifier.fillMaxWidth(),
                             showClear = true,
+                            trailing = {
+                                MicIconButton(
+                                    onClick = { startVoice("note") },
+                                    enabled = voiceCanUse,
+                                    description = "语音输入备注",
+                                )
+                            },
                         )
                         Text(
                             "${note.length} / $MAX_NOTE",
@@ -943,6 +1070,11 @@ fun EditScreen(
             }
 
             // ---------------------------------------------- 底部固定保存栏
+            HorizontalDivider(
+                thickness = 1.dp,
+                color = MaterialTheme.colorScheme.outlineVariant,
+            )
+            Surface(color = MaterialTheme.colorScheme.surface) {
             Button(
                 onClick = {
                     val finalName = name.trim()
@@ -983,18 +1115,19 @@ fun EditScreen(
                     scope.launch {
                         if (existing == null) store.createItem(context, draft)
                         else store.updateItem(context, existing.id, draft)
-                        onDone()
+                        finish()
                     }
                 },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp)
-                    .height(50.dp),
-                shape = RoundedCornerShape(12.dp),
+                    .padding(horizontal = 16.dp, vertical = 14.dp)
+                    .height(54.dp),
+                shape = RoundedCornerShape(16.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.primary,
                 ),
             ) { Text(if (existing == null) "保存" else "保存", style = MaterialTheme.typography.titleMedium) }
+            }
         }
 
         // 底部浮层提示：贴在保存栏上方，几秒后自动消失，不占页面高度
@@ -1087,6 +1220,21 @@ fun EditScreen(
         }
     }
 
+    voiceDialogTarget?.let { target ->
+        VoiceInputDialog(
+            prompt = when (target) {
+                "quick" -> "说出：物品名称 + 到期日 + 放在哪"
+                "note" -> "说出存放位置或备注"
+                else -> "说出物品名称"
+            },
+            onDismiss = { voiceDialogTarget = null },
+            onResult = { spoken ->
+                applySpoken(spoken)
+                voiceDialogTarget = null
+            },
+        )
+    }
+
     if (confirmDelete && existing != null) {
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
@@ -1097,7 +1245,7 @@ fun EditScreen(
                     confirmDelete = false
                     scope.launch {
                         store.removeItem(context, existing.id)
-                        onDone()
+                        finish()
                     }
                 }) { Text("删除") }
             },
@@ -1155,7 +1303,7 @@ fun EditScreen(
 @Composable
 private fun FieldLabel(text: String, optional: Boolean = false, ocrBadge: Boolean = false) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(text, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+        Text(text, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
         // 已由识别填入时不再标「选填」——两个标签挤在一行会看不清
         if (optional && !ocrBadge) {
             Spacer(Modifier.width(6.dp))
@@ -1821,4 +1969,75 @@ private fun Modifier.dashedBorder(color: Color, cornerRadius: Dp): Modifier = dr
         0f, 0f, size.width, size.height,
         cornerRadius.toPx(), cornerRadius.toPx(), paint,
     )
+}
+
+/** 分组卡片：统一圆角、浅描边与内边距，长表单拆开后不再是一整块白板。 */
+@Composable
+private fun FormCard(content: @Composable ColumnScope.() -> Unit) {
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 1.dp,
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f),
+        ),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            content = content,
+        )
+    }
+}
+
+/** 表单分组标题：主色文字 + 细分割线，把长表单切成三段，视觉层级更清楚。 */
+@Composable
+private fun EditSectionHeader(title: String, caption: String? = null) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                title,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.width(10.dp))
+            HorizontalDivider(
+                Modifier.weight(1f),
+                thickness = 1.dp,
+                color = MaterialTheme.colorScheme.outlineVariant,
+            )
+        }
+        if (!caption.isNullOrBlank()) {
+            Text(
+                caption,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+        }
+    }
+}
+
+/** 统一 40dp 的麦克风图标按钮：不使用文字，避免把输入框挤窄。 */
+@Composable
+private fun MicIconButton(
+    onClick: () -> Unit,
+    enabled: Boolean,
+    description: String,
+) {
+    IconButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.size(40.dp),
+    ) {
+        Icon(
+            painter = painterResource(R.drawable.ic_mic),
+            contentDescription = description,
+            modifier = Modifier.size(20.dp),
+            tint = if (enabled) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
+        )
+    }
 }

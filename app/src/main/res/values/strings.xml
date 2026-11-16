@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">到期提醒</string>
+    <string name="widget_small_desc">2×2 紧凑清单：最紧急的几件物品，可上下滑动</string>
+    <string name="widget_medium_desc">4×2 清单：一屏查看更多物品，可上下滑动</string>
+    <string name="widget_large_desc">4×4 完整清单：按到期日排序，可上下滑动</string>
 </resources>

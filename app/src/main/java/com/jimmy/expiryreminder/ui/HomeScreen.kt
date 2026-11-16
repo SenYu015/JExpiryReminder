@@ -6,7 +6,6 @@ package com.jimmy.expiryreminder.ui
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
-import android.os.SystemClock
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
@@ -49,6 +48,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -67,6 +67,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -91,6 +92,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
@@ -101,6 +103,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.jimmy.expiryreminder.core.Dates
 import com.jimmy.expiryreminder.core.ExpiryItem
@@ -175,6 +178,7 @@ fun HomeScreen(
     val notifyEnabled by settings.notifyEnabled.collectAsStateWithLifecycle()
     val notifyTime by settings.notifyTime.collectAsStateWithLifecycle()
     val useAlarmClock by settings.useAlarmClock.collectAsStateWithLifecycle()
+    val liveUpdateEnabled by settings.liveUpdateEnabled.collectAsStateWithLifecycle()
     val statCards by settings.statCards.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
 
@@ -192,28 +196,19 @@ fun HomeScreen(
     // 全屏图片查看器：paths + 起始下标，null = 未打开
     var viewer by remember { mutableStateOf<Pair<List<String>, Int>?>(null) }
 
-    // 多选态下返回 = 退出多选；主页返回 = 两次才退出（防误触）
-    var lastBackAt by remember { mutableStateOf(0L) }
-    BackHandler(enabled = true) {
-        if (selectMode) {
-            selectMode = false
-            selected = emptySet()
-            lastBackAt = 0L
-        } else {
-            val now = SystemClock.elapsedRealtime()
-            if (now - lastBackAt <= 2000L) {
-                context.findActivity()?.finish()
-            } else {
-                lastBackAt = now
-                Toast.makeText(context, "再按一次返回键退出", Toast.LENGTH_SHORT).show()
-            }
-        }
+    // 只在多选态拦截返回；主页本身不拦截，交给系统处理，
+    // 这样「返回桌面」才能走 ColorOS 的预测性返回动画（缩小到桌面图标）。
+    BackHandler(enabled = selectMode) {
+        selectMode = false
+        selected = emptySet()
     }
 
     // 数据就绪后同步一次排程（新增/修改/删除都会经 store，这里兜底）
     LaunchedEffect(state.items, notifyEnabled, notifyTime, useAlarmClock) {
         if (state.loaded) {
-            ReminderService.syncScheduled(context, store, notifyEnabled, notifyTime, useAlarmClock)
+            ReminderService.syncScheduled(
+                context, store, notifyEnabled, notifyTime, useAlarmClock, liveUpdateEnabled,
+            )
         }
     }
 
@@ -398,13 +393,13 @@ fun HomeScreen(
                     Row(
                         Modifier
                             .fillMaxWidth()
-                            .padding(start = 16.dp, end = 4.dp, top = 12.dp, bottom = 12.dp),
+                            .padding(start = 20.dp, end = 12.dp, top = 16.dp, bottom = 12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Column(Modifier.weight(1f)) {
                             Text(
                                 "到期提醒",
-                                style = MaterialTheme.typography.headlineSmall,
+                                style = MaterialTheme.typography.headlineMedium,
                                 fontWeight = FontWeight.Bold,
                             )
                             Spacer(Modifier.height(2.dp))
@@ -418,7 +413,7 @@ fun HomeScreen(
                         Box {
                             Surface(
                                 onClick = { spaceMenuOpen = true },
-                                shape = RoundedCornerShape(10.dp),
+                                shape = RoundedCornerShape(18.dp),
                                 color = MaterialTheme.colorScheme.surface,
                                 border = androidx.compose.foundation.BorderStroke(
                                     1.dp, MaterialTheme.colorScheme.outline,
@@ -540,8 +535,24 @@ fun HomeScreen(
                                 )
                             }
                         }
-                        IconButton(onClick = onSettings) {
-                            Icon(Icons.Filled.Settings, contentDescription = "设置")
+                        Surface(
+                            onClick = onSettings,
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.surface,
+                            shadowElevation = 2.dp,
+                            border = androidx.compose.foundation.BorderStroke(
+                                1.dp, MaterialTheme.colorScheme.outlineVariant,
+                            ),
+                            modifier = Modifier.size(42.dp),
+                        ) {
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Icon(
+                                    Icons.Filled.Settings,
+                                    contentDescription = "设置",
+                                    tint = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
                         }
                     }
                 }
@@ -582,7 +593,7 @@ fun HomeScreen(
                         Surface(
                             onClick = { categoryMenuOpen = true },
                             modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(10.dp),
+                            shape = RoundedCornerShape(18.dp),
                             color = MaterialTheme.colorScheme.surface,
                             border = androidx.compose.foundation.BorderStroke(
                                 1.dp, MaterialTheme.colorScheme.outline,
@@ -661,7 +672,7 @@ fun HomeScreen(
                     // 分类管理（独立页面）
                     Surface(
                         onClick = onCategories,
-                        shape = RoundedCornerShape(10.dp),
+                        shape = RoundedCornerShape(18.dp),
                         color = Color(0xFF67C23A),
                     ) {
                         Row(
@@ -689,7 +700,7 @@ fun HomeScreen(
                                 selectMode = true
                             }
                         },
-                        shape = RoundedCornerShape(10.dp),
+                        shape = RoundedCornerShape(18.dp),
                         color = if (selectMode) MaterialTheme.colorScheme.errorContainer
                         else MaterialTheme.colorScheme.surface,
                         border = androidx.compose.foundation.BorderStroke(
@@ -766,9 +777,9 @@ fun HomeScreen(
                         .categorySlide({ slide.value }, slideShiftPx),
                     state = listState,
                     contentPadding = PaddingValues(
-                        start = 16.dp, end = 16.dp, top = 6.dp, bottom = 12.dp,
+                        start = 16.dp, end = 16.dp, top = 8.dp, bottom = 20.dp,
                     ),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     grouped.forEach { (status, items) ->
                         item(key = "header_${status.name}") {
@@ -797,6 +808,8 @@ fun HomeScreen(
                         }
                         items(items.size, key = { items[it].id }) { index ->
                             val item = items[index]
+                            // 新增/删除/移动时条目自带位移动画，接近流体动效的连续感
+                            Box(Modifier.animateItem()) {
                             ItemRow(
                                 item = item,
                                 store = store,
@@ -821,6 +834,7 @@ fun HomeScreen(
                                     viewer = item.images.map { it.path } to 0
                                 },
                             )
+                            }
                         }
                     }
                 }
@@ -956,75 +970,108 @@ private fun HomeBottomBar(
     onOcr: () -> Unit,
     onAdd: () -> Unit,
 ) {
-    Surface(color = MaterialTheme.colorScheme.background) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .imePadding(),
+    // 参考通知中心：中间是悬浮胶囊工具条，右侧是独立的绿色圆形新增按钮
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .imePadding()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+    ) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            // 一条极淡的分隔线：列表滚到尽头时内容不会和搜索栏糊在一起
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .height(1.dp)
-                    .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)),
-            )
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
+            Surface(
+                shape = RoundedCornerShape(28.dp),
+                color = MaterialTheme.colorScheme.surface,
+                shadowElevation = 4.dp,
+                tonalElevation = 1.dp,
+                modifier = Modifier
+                    .weight(1f)
+                    .height(56.dp),
             ) {
-                InputBox(
-                    value = keyword,
-                    onValueChange = onKeywordChange,
-                    placeholder = "搜索名称或备注",
-                    fixedHeight = 48.dp,
-                    showClear = true,
-                    leading = {
-                        Icon(
-                            Icons.Filled.Search, contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp),
-                        )
-                    },
-                    modifier = Modifier.weight(1f),
-                )
-                // 识别：白底描边的次要入口，与搜索框同高同圆
-                Surface(
-                    onClick = onOcr,
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.surface,
-                    border = androidx.compose.foundation.BorderStroke(
-                        1.dp, MaterialTheme.colorScheme.outline,
-                    ),
-                    modifier = Modifier
-                        .size(48.dp)
-                        .semantics { contentDescription = "图像识别" },
+                Row(
+                    Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        CameraGlyph(
-                            color = MaterialTheme.colorScheme.primary,
-                            holeColor = MaterialTheme.colorScheme.surface,
-                            modifier = Modifier.size(22.dp),
+                    Icon(
+                        Icons.Filled.Search,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                        if (keyword.isEmpty()) {
+                            Text(
+                                "搜索名称或备注",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                            )
+                        }
+                        BasicTextField(
+                            value = keyword,
+                            onValueChange = onKeywordChange,
+                            singleLine = true,
+                            textStyle = LocalTextStyle.current.copy(
+                                color = MaterialTheme.colorScheme.onSurface,
+                                fontSize = 15.sp,
+                            ),
+                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                            modifier = Modifier.fillMaxWidth(),
                         )
+                    }
+                    if (keyword.isNotEmpty()) {
+                        IconButton(
+                            onClick = { onKeywordChange("") },
+                            modifier = Modifier.size(32.dp),
+                        ) {
+                            Icon(
+                                Icons.Filled.Close,
+                                contentDescription = "清空搜索",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        }
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    Surface(
+                        onClick = onOcr,
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .semantics { contentDescription = "图像识别" },
+                    ) {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            CameraGlyph(
+                                color = MaterialTheme.colorScheme.primary,
+                                holeColor = MaterialTheme.colorScheme.surfaceVariant,
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
                     }
                 }
-                // 新增：主入口，沿用原来的黄色圆钮
-                Surface(
-                    onClick = onAdd,
-                    shape = CircleShape,
-                    color = Color(0xFFFFC107),
-                    modifier = Modifier.size(48.dp),
-                ) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Icon(
-                            Icons.Filled.Add, contentDescription = "新增",
-                            tint = Color(0xFF303133), modifier = Modifier.size(24.dp),
-                        )
-                    }
+            }
+            Surface(
+                onClick = onAdd,
+                shape = CircleShape,
+                color = Color(0xFF22C55E),
+                shadowElevation = 6.dp,
+                modifier = Modifier.size(56.dp),
+            ) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Icon(
+                        Icons.Filled.Add,
+                        contentDescription = "新增",
+                        tint = Color.White,
+                        modifier = Modifier.size(26.dp),
+                    )
                 }
             }
         }
@@ -1108,12 +1155,9 @@ private fun StatCard(
 ) {
     Card(
         modifier = modifier,
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(18.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-        border = androidx.compose.foundation.BorderStroke(
-            1.dp, MaterialTheme.colorScheme.outline,
-        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
     ) {
         Column(
             Modifier.padding(
@@ -1176,7 +1220,7 @@ private fun ItemRow(
             // 多选态不画删除底色：卡片选中色是半透明的，红底会透上来变成一片红
             if (!selectMode) {
                 Box(
-                    Modifier.fillMaxSize().background(MaterialTheme.colorScheme.error, RoundedCornerShape(12.dp)),
+                    Modifier.fillMaxSize().background(MaterialTheme.colorScheme.error, RoundedCornerShape(24.dp)),
                     contentAlignment = Alignment.CenterEnd,
                 ) {
                     Icon(
@@ -1188,7 +1232,7 @@ private fun ItemRow(
         },
     ) {
         Card(
-            shape = RoundedCornerShape(12.dp),
+            shape = RoundedCornerShape(24.dp),
             modifier = Modifier
                 .fillMaxWidth()
                 .combinedClickable(onClick = onClick, onLongClick = onLongClick),
@@ -1198,16 +1242,14 @@ private fun ItemRow(
                     androidx.compose.ui.graphics.lerp(
                         MaterialTheme.colorScheme.surface,
                         MaterialTheme.colorScheme.primary,
-                        0.14f,
+                        0.10f,
                     )
                 } else {
                     MaterialTheme.colorScheme.surface
                 },
             ),
-            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-            border = if (selected) null else androidx.compose.foundation.BorderStroke(
-                1.dp, MaterialTheme.colorScheme.outline,
-            ),
+            // 参考通知中心：干净的大圆角白卡，去掉四周描边与彩色角落
+            elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
         ) {
             Row(
                 Modifier.height(IntrinsicSize.Min),

@@ -60,6 +60,22 @@ class SettingsStore private constructor() {
     private val _statCards = MutableStateFlow(StatCard.DEFAULT)
     val statCards: StateFlow<List<StatCard>> get() = _statCards
 
+    /** 同一 Wi-Fi 下自动发现设备并合并数据；默认关闭，老用户升级后不受影响。 */
+    private val _autoSyncEnabled = MutableStateFlow(false)
+    val autoSyncEnabled: StateFlow<Boolean> get() = _autoSyncEnabled
+
+    /** 预测性返回动画：关闭后走普通返回，不做跟手缩放。 */
+    private val _predictiveBackEnabled = MutableStateFlow(true)
+    val predictiveBackEnabled: StateFlow<Boolean> get() = _predictiveBackEnabled
+
+    /** 流体云 / Live Update 提醒：仅 Android 16+ 且有系统支持时生效，否则自动降级。 */
+    private val _liveUpdateEnabled = MutableStateFlow(true)
+    val liveUpdateEnabled: StateFlow<Boolean> get() = _liveUpdateEnabled
+
+    /** 开机后是否恢复 30 分钟一次的自动同步排程。 */
+    private val _autoSyncOnBoot = MutableStateFlow(true)
+    val autoSyncOnBoot: StateFlow<Boolean> get() = _autoSyncOnBoot
+
     fun load(context: Context) {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val raw = prefs.getString(KEY_SETTINGS, null) ?: return
@@ -76,6 +92,19 @@ class SettingsStore private constructor() {
             // 旧版本没有这个键：缺省按开启处理（只读，不重写用户已有设置）
             if (map.has("useAlarmClock") && !map.isNull("useAlarmClock")) {
                 _useAlarmClock.value = map.optBoolean("useAlarmClock", true)
+            }
+            // 自动同步默认关闭；旧版本没有这个键时保持默认，不写回
+            if (map.has("autoSyncEnabled") && !map.isNull("autoSyncEnabled")) {
+                _autoSyncEnabled.value = map.optBoolean("autoSyncEnabled", false)
+            }
+            if (map.has("predictiveBackEnabled") && !map.isNull("predictiveBackEnabled")) {
+                _predictiveBackEnabled.value = map.optBoolean("predictiveBackEnabled", true)
+            }
+            if (map.has("liveUpdateEnabled") && !map.isNull("liveUpdateEnabled")) {
+                _liveUpdateEnabled.value = map.optBoolean("liveUpdateEnabled", true)
+            }
+            if (map.has("autoSyncOnBoot") && !map.isNull("autoSyncOnBoot")) {
+                _autoSyncOnBoot.value = map.optBoolean("autoSyncOnBoot", true)
             }
             // 旧版本没有统计卡配置：保持默认，不写回
             val cards = map.optJSONArray("statCards")
@@ -98,23 +127,35 @@ class SettingsStore private constructor() {
         notifyTime: String? = null,
         useAlarmClock: Boolean? = null,
         statCards: List<StatCard>? = null,
+        autoSyncEnabled: Boolean? = null,
+        predictiveBackEnabled: Boolean? = null,
+        liveUpdateEnabled: Boolean? = null,
+        autoSyncOnBoot: Boolean? = null,
     ) {
         if (themeMode != null) _themeMode.value = themeMode
         if (notifyEnabled != null) _notifyEnabled.value = notifyEnabled
         if (notifyTime != null && TIME_REGEX.matches(notifyTime)) _notifyTime.value = notifyTime
         if (useAlarmClock != null) _useAlarmClock.value = useAlarmClock
         if (statCards != null) _statCards.value = StatCard.normalize(statCards.map { it.key })
+        if (autoSyncEnabled != null) _autoSyncEnabled.value = autoSyncEnabled
+        if (predictiveBackEnabled != null) _predictiveBackEnabled.value = predictiveBackEnabled
+        if (liveUpdateEnabled != null) _liveUpdateEnabled.value = liveUpdateEnabled
+        if (autoSyncOnBoot != null) _autoSyncOnBoot.value = autoSyncOnBoot
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
             .putString(
                 KEY_SETTINGS,
                 JSONObject()
-                    .put("version", 4)
+                    .put("version", 6)
                     .put("theme", _themeMode.value.name)
                     .put("notifyEnabled", _notifyEnabled.value)
                     .put("notifyTime", _notifyTime.value)
                     .put("useAlarmClock", _useAlarmClock.value)
                     .put("statCards", JSONArray(_statCards.value.map { it.key }))
+                    .put("autoSyncEnabled", _autoSyncEnabled.value)
+                    .put("predictiveBackEnabled", _predictiveBackEnabled.value)
+                    .put("liveUpdateEnabled", _liveUpdateEnabled.value)
+                    .put("autoSyncOnBoot", _autoSyncOnBoot.value)
                     .toString(),
             )
             .apply()

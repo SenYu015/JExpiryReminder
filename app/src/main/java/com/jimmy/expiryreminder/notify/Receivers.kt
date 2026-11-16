@@ -89,6 +89,7 @@ internal suspend fun rescheduleAll(context: Context) {
     ReminderService.syncScheduled(
         context, store,
         settings.notifyEnabled.value, settings.notifyTime.value, settings.useAlarmClock.value,
+        settings.liveUpdateEnabled.value,
     )
 }
 
@@ -102,6 +103,8 @@ class BootReceiver : BroadcastReceiver() {
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             try {
                 rescheduleAll(appContext)
+                // 开机后恢复 30 分钟一次的自动同步（设置里可关）
+                com.jimmy.expiryreminder.core.AutoSyncEngine.scheduleIfEnabled(appContext)
             } finally {
                 pending.finish()
             }

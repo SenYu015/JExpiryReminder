@@ -3,6 +3,7 @@ package com.jimmy.expiryreminder.notify
 import android.Manifest
 import android.app.AlarmManager
 import android.app.AlarmManager.AlarmClockInfo
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -11,7 +12,9 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.PowerManager
+import android.provider.Settings
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.jimmy.expiryreminder.MainActivity
 import com.jimmy.expiryreminder.core.Dates
@@ -23,6 +26,7 @@ import java.time.Instant
 import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
+import java.lang.reflect.Modifier
 
 /**
  * 到期提醒的通知能力：原生实现，走 AlarmManager。
@@ -42,10 +46,10 @@ object ReminderService {
     const val CHANNEL_NAME = "到期提醒"
 
     /** 一次最多排入多少条，超出部分留给下次同步（按触发时间从近到远取）。 */
-    const val MAX_PLANS = 60
+    const val MAX_PLANS = 200
 
-    /** 与当前时间的最小间隔（毫秒）。 */
-    const val MIN_LEAD_MS = 60_000L
+    /** 与当前时间的最小间隔（毫秒）。小于它就改走「立即补发」，不再直接丢弃。 */
+    const val MIN_LEAD_MS = 10_000L
 
     /** 开机重排用的占位 requestCode（不属于任何真实提醒）。 */
     const val BOOT_REQUEST_CODE = 1999999999
@@ -54,7 +58,13 @@ object ReminderService {
     const val REFILL_REQUEST_CODE = 1999999998
 
     /** 触发后延迟多久补排：等同一时刻的其它闹钟都投递完，避免被 cancelAll 一起清掉。 */
-    const val REFILL_DELAY_MS = 3 * 60_000L
+    const val REFILL_DELAY_MS = 45_000L
+
+    /** 流体云 / Live Update 汇总通知的固定 id。 */
+    const val LIVE_SUMMARY_ID = 9100
+
+    /** 主闹钟后 90 秒的备份闹钟：ROM 吞掉主闹钟时兜底，去重键保证不会重复打扰。 */
+    const val BACKUP_DELAY_MS = 90_000L
 
     data class PlannedReminder(
         val key: String,
@@ -67,6 +77,16 @@ object ReminderService {
 
     /** 设置页「后台可靠性」自检用的快照。 */
     data class ScheduledInfo(val count: Int, val nextAt: LocalDateTime?)
+
+    /** 流体云 / 系统实时动态自检快照：用于解释「为什么只有通知栏提醒」。 */
+    data class LiveUpdateStatus(
+        val supported: Boolean,
+        val canPost: Boolean,
+        val active: Boolean,
+        val requested: Boolean,
+        val promoted: Boolean,
+        val promotable: Boolean?,
+    )
 
     fun createChannel(context: Context) {
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -125,6 +145,8 @@ object ReminderService {
         items: List<ExpiryItem>,
         notifyTime: String,
         now: LocalDateTime = LocalDateTime.now(),
+        /** 是否把「今天已过推送时刻、但还没提醒过」的档位转成 5 秒后的立即提醒。 */
+        includeMissed: Boolean = false,
     ): List<PlannedReminder> {
         val time = readNotifyTime(notifyTime)
         val drafts = mutableListOf<PlannedReminder>()
@@ -138,10 +160,29 @@ object ReminderService {
             for (days in levels) {
                 val fireDate = Dates.addDays(item.expireAt, -days)
                 val fireAt = Dates.parseISO(fireDate)?.atTime(time) ?: continue
-                if (Duration.between(now, fireAt).toMillis() < MIN_LEAD_MS) continue
+                val key = "$fireDate:${item.id}:$days"
+                if (Duration.between(now, fireAt).toMillis() < MIN_LEAD_MS) {
+                    // 今天已过推送时刻但这一档还没提醒过：5 秒后立即补发。
+                    // 以前这里直接 continue，下午新增的当天到期物品会整天收不到提醒。
+                    if (includeMissed && fireDate == now.toLocalDate().toString() &&
+                        key !in item.notifiedKeys
+                    ) {
+                        drafts.add(
+                            PlannedReminder(
+                                key = key,
+                                itemId = item.id,
+                                at = now.plusSeconds(5),
+                                title = "到期提醒",
+                                body = describe(item, days),
+                                id = 0,
+                            ),
+                        )
+                    }
+                    continue
+                }
                 drafts.add(
                     PlannedReminder(
-                        key = "$fireDate:${item.id}:$days",
+                        key = key,
                         itemId = item.id,
                         at = fireAt,
                         title = "到期提醒",
@@ -176,6 +217,7 @@ object ReminderService {
         notifyEnabled: Boolean,
         notifyTime: String,
         useAlarmClock: Boolean = true,
+        liveUpdateEnabled: Boolean = true,
     ) {
         val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         // 先清掉全部旧闹钟
@@ -184,10 +226,13 @@ object ReminderService {
         if (!notifyEnabled || !hasNotificationPermission(context)) {
             saveScheduledIds(context, emptySet())
             saveScheduledInfo(context, ScheduledInfo(0, null))
+            cancelLiveSummary(context)
             return
         }
 
-        val plan = buildReminderPlan(store.items, notifyTime)
+        // includeMissed：把今天已过点但还没提醒的档位补成 5 秒后的即时提醒，
+        // 解决「下午新增当天到期物品，当天收不到通知」的问题。
+        val plan = buildReminderPlan(store.items, notifyTime, includeMissed = true)
         val exact = canScheduleExact(context)
         val showIntent = launchAppPendingIntent(context)
         for (entry in plan) {
@@ -203,9 +248,24 @@ object ReminderService {
             } catch (_: SecurityException) {
                 am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pi)
             }
+            // 48 小时内再排一条 +90s 的备份闹钟：主闹钟被 ROM 省电策略吞掉时兜底。
+            // requestCode 用负数，和真实提醒 id（正数）天然隔离；重复触发由去重键拦掉。
+            if (triggerAt - System.currentTimeMillis() <= 48 * 3600_000L) {
+                val backup = alarmPendingIntent(context, -entry.id, entry.key, entry.itemId, entry.body)
+                val backupAt = triggerAt + BACKUP_DELAY_MS
+                try {
+                    if (exact) am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, backupAt, backup)
+                    else am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, backupAt, backup)
+                } catch (_: SecurityException) {
+                    am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, backupAt, backup)
+                }
+            }
         }
         saveScheduledIds(context, plan.map { it.id }.toSet())
         saveScheduledInfo(context, ScheduledInfo(plan.size, plan.firstOrNull()?.at))
+
+        // 流体云 / Live Update：7 天内的到期汇总，Android 16+ 交给系统提升为胶囊卡片
+        repostLiveSummary(context, store, liveUpdateEnabled)
     }
 
     /**
@@ -273,6 +333,8 @@ object ReminderService {
         for (raw in saved) {
             val id = raw.toIntOrNull() ?: continue
             am.cancel(alarmPendingIntent(context, id, "", "", ""))
+            // 备份闹钟用负 requestCode，别漏取消，否则重排后旧备份会在错误时间弹
+            am.cancel(alarmPendingIntent(context, -id, "", "", ""))
         }
         am.cancel(alarmPendingIntent(context, BOOT_REQUEST_CODE, "", "", ""))
     }
@@ -316,8 +378,119 @@ object ReminderService {
             .setContentText(body)
             .setContentIntent(launchAppPendingIntent(context))
             .setAutoCancel(true)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(NotificationCompat.CATEGORY_REMINDER)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .build())
+    }
+
+    /** 只重发流体云汇总，不重排闹钟；设置页「重新发布」用这个，避免无谓地清建全部闹钟。 */
+    fun repostLiveSummary(context: Context, store: ExpiryStore, enabled: Boolean) {
+        if (!enabled) {
+            cancelLiveSummary(context)
+            return
+        }
+        val soon = store.items.mapNotNull { item ->
+            if (item.archived || !Dates.isValidISODate(item.expireAt)) null
+            else Dates.daysUntil(item.expireAt)?.takeIf { it in 0..7 }?.let { item to it }
+        }.sortedBy { it.second }
+        if (soon.isEmpty()) cancelLiveSummary(context)
+        else showLiveSummary(
+            context,
+            soon.size,
+            soon.take(3).joinToString("；") { describe(it.first, it.second) },
+        )
+    }
+
+    /** 打开 Android 16+ 的「应用实时动态」授权页；不支持时退回应用通知设置。 */
+    fun openLiveUpdateSettings(context: Context) {
+        val intent = if (Build.VERSION.SDK_INT >= 36) {
+            Intent(Settings.ACTION_APP_NOTIFICATION_PROMOTION_SETTINGS)
+                .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+        } else {
+            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+        }
+        runCatching { context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+    }
+
+    /** 读取系统侧实时动态能力，解释「已请求提升但没有被系统提升」的原因。 */
+    fun liveUpdateStatus(context: Context): LiveUpdateStatus {
+        val supported = Build.VERSION.SDK_INT >= 36
+        val canPost = if (supported) {
+            runCatching { NotificationManagerCompat.from(context).canPostPromotedNotifications() }
+                .getOrDefault(false)
+        } else false
+        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val active = manager.activeNotifications.firstOrNull { it.id == LIVE_SUMMARY_ID }
+        val notification = active?.notification
+        val requested = if (supported && notification != null) {
+            // compileSdk 36 尚未暴露 isRequestPromotedOngoing()，直接读平台 extras 键
+            runCatching {
+                notification.extras?.getBoolean("android.requestPromotedOngoing", false) ?: false
+            }.getOrDefault(false)
+        } else false
+        val promoted = if (supported && notification != null) {
+            (notification.flags and Notification.FLAG_PROMOTED_ONGOING) != 0
+        } else false
+        val promotable = if (notification == null) null else {
+            runCatching {
+                val method = Notification::class.java.getDeclaredMethod("hasPromotableCharacteristics")
+                method.isAccessible = true
+                val receiver = if (Modifier.isStatic(method.modifiers)) null else notification
+                method.invoke(receiver) as? Boolean
+            }.getOrNull()
+        }
+        return LiveUpdateStatus(supported, canPost, active != null, requested, promoted, promotable)
+    }
+
+    /**
+     * 流体云 / Live Update 汇总：7 天内的到期物品合成一条常驻通知。
+     *
+     * ColorOS 16 起流体云对接原生 Android 16 Live Updates API。真机排查发现：
+     * CATEGORY_REMINDER + 默认 PRIVATE 可见性只会被记录为「请求提升」，不会得到
+     * FLAG_PROMOTED_ONGOING；改用 CATEGORY_STATUS + VISIBILITY_PUBLIC + 非彩色化后，
+     * 真机已出现 PROMOTED_ONGOING。低版本或用户关闭实时动态时自动降级为普通通知。
+     */
+    fun showLiveSummary(context: Context, count: Int, body: String) {
+        if (!hasNotificationPermission(context)) return
+        if (count <= 0) {
+            cancelLiveSummary(context)
+            return
+        }
+        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val title = "有 $count 件物品即将到期"
+        if (Build.VERSION.SDK_INT >= 36) {
+            val short = if (count > 99) "99+ 件" else "$count 件"
+            // androidx.core 1.17 已封装 36.1 的 promoted ongoing：内部写的就是平台 extras，
+            // 比直接调平台类型化 setter 更稳（compileSdk 36 上平台方法不可见）。
+            val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+                .setSmallIcon(com.jimmy.expiryreminder.R.drawable.ic_stat_alarm)
+                .setContentTitle(title)
+                .setContentText(body)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setPriority(NotificationCompat.PRIORITY_MAX)
+                // Live Update 规范偏向「正在进行的状态」，不用 REMINDER 类别；
+                // 显式公开可见、关闭彩色化，避免被系统判定为不可提升
+                .setCategory(NotificationCompat.CATEGORY_STATUS)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setColorized(false)
+                .setContentIntent(launchAppPendingIntent(context))
+                .setShortCriticalText(short)
+                .setRequestPromotedOngoing(true)
+                .build()
+            runCatching { manager.notify(LIVE_SUMMARY_ID, notification) }
+                .onFailure { showNotification(context, LIVE_SUMMARY_ID, title, body) }
+        } else {
+            showNotification(context, LIVE_SUMMARY_ID, title, body)
+        }
+    }
+
+    fun cancelLiveSummary(context: Context) {
+        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.cancel(LIVE_SUMMARY_ID)
     }
 
     /**

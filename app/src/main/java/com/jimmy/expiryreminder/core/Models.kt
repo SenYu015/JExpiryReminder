@@ -329,6 +329,18 @@ data class ExpiryItem(
     val updatedAt: String,
     /** 归属空间；缺省 = 未分配。只有用户主动维护了空间，才会在这里写入空间 id。 */
     val spaceId: String = "",
+    /**
+     * 修改标记（Lamport 逻辑时钟）。每次本机新增/修改时取本机全局时钟 +1；
+     * 从别的设备同步来的记录**沿用对方的 rev**，不重新分配。
+     * 同步时只交换 rev 大于对方水位的记录，双方都有变更时以 rev 较大者为准。
+     */
+    val rev: Long = 0,
+    /**
+     * 共同唯一 ID：创建时生成、跨设备同步时随记录传递、永不随编辑变化。
+     * 旧数据缺字段时由仓库用 id 派生补发；两台设备各自离线录入同一物品时，
+     * 自动同步会按业务键把双方收敛到同一个 syncId。
+     */
+    val syncId: String = "",
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("id", id)
@@ -347,6 +359,8 @@ data class ExpiryItem(
         .put("archived", archived)
         .put("createdAt", createdAt)
         .put("updatedAt", updatedAt)
+        .put("rev", rev)
+        .put("syncId", syncId)
 
     companion object {
         fun fromJson(raw: Any?): ExpiryItem? {
@@ -385,6 +399,9 @@ data class ExpiryItem(
                 updatedAt = raw.optStringOrNull("updatedAt") ?: now,
                 // 字段缺失或显式空串都是「未分配」，默认不归属任何空间
                 spaceId = raw.optStringOrNull("spaceId") ?: "",
+                // 老版本没有修改标记：读到 0，首次落盘时统一补发
+                rev = raw.optLong("rev", 0L),
+                syncId = raw.optStringOrNull("syncId")?.trim().orEmpty(),
             )
         }
 
@@ -413,6 +430,8 @@ data class ExpiryData(
      * 自定义空间的颜色直接写在 [spaces] 里，不进这张表。
      */
     val spaceColors: Map<String, String> = emptyMap(),
+    /** 本机全局修改时钟：所有物品 rev 的最大值水位，随 data.json 一起落盘。 */
+    val revision: Long = 0,
 ) {
     fun toJson(): JSONObject {
         val colors = JSONObject()
@@ -430,11 +449,12 @@ data class ExpiryData(
             .put("categoryOrder", JSONArray(categoryOrder))
             .put("spaces", JSONArray(spaces.map { it.toJson() }))
             .put("spaceColors", spaceColorJson)
+            .put("revision", revision)
     }
 }
 
-/** data.json 当前版本：v4 图片改文件相对路径；v5 分类颜色可编辑；v6 物品归属空间；v7 空间颜色可编辑；v8 去掉内置默认空间（未维护的空间读取时视为未分配，不改写历史数据）。 */
-const val DATA_VERSION = 8
+/** data.json 当前版本：v4 图片改文件相对路径；v5 分类颜色可编辑；v6 物品归属空间；v7 空间颜色可编辑；v8 去掉内置默认空间；v9 增加 rev 修改标记与顶层 revision 时钟；v10 增加 syncId 共同唯一 ID（旧数据缺字段按空读取，首次落盘由 id 派生补发）。 */
+const val DATA_VERSION = 10
 
 // ---------------------------------------------------------------- 状态
 

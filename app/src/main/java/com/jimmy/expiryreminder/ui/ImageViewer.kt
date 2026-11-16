@@ -3,6 +3,8 @@
 package com.jimmy.expiryreminder.ui
 
 import android.graphics.BitmapFactory
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -28,6 +30,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -46,6 +49,8 @@ import androidx.compose.ui.window.DialogProperties
 import com.jimmy.expiryreminder.core.ImageStore
 import com.jimmy.expiryreminder.core.normalizeImagePath
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.max
@@ -53,7 +58,8 @@ import kotlin.math.sqrt
 
 /**
  * 全屏图片查看器：黑底铺满 + 左右翻页 + 双指缩放/拖动 + 双击放大。
- * 点空白区域或按返回键关闭；[paths] 为图片相对路径列表（多张时翻页看）。
+ * 点图片或背景的任意位置都会「最小化」（缩小淡出）后关闭，按返回键同样关闭；
+ * [paths] 为图片相对路径列表（多张时翻页看）。
  */
 @Composable
 fun ImageViewerOverlay(
@@ -61,6 +67,23 @@ fun ImageViewerOverlay(
     initialIndex: Int,
     onDismiss: () -> Unit,
 ) {
+    // 点任意位置最小化：先缩小淡出，再关闭，避免「点图片没反应」的错觉
+    var minimizing by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val collapse by animateFloatAsState(
+        targetValue = if (minimizing) 1f else 0f,
+        animationSpec = tween(durationMillis = 180),
+        label = "minimize",
+    )
+    fun minimize() {
+        if (minimizing) return
+        minimizing = true
+        scope.launch {
+            delay(180)
+            onDismiss()
+        }
+    }
+
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(
@@ -72,9 +95,15 @@ fun ImageViewerOverlay(
             Modifier
                 .fillMaxSize()
                 .background(Color.Black)
-                // 点背景关闭；图片自己消费点击，不会误关
+                .graphicsLayer {
+                    val s = 1f - 0.82f * collapse
+                    scaleX = s
+                    scaleY = s
+                    alpha = 1f - collapse
+                }
+                // 背景与图片任意位置都能触发最小化
                 .pointerInput(Unit) {
-                    detectTapGestures(onTap = { onDismiss() })
+                    detectTapGestures(onTap = { minimize() })
                 },
         ) {
             val count = paths.size
@@ -83,7 +112,7 @@ fun ImageViewerOverlay(
                 pageCount = { count },
             )
             HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
-                ViewerPage(path = paths[page])
+                ViewerPage(path = paths[page], onTap = { minimize() })
             }
             // 顶部：关闭按钮 + 页码（statusBarsPadding 防止被状态栏压住）
             Box(
@@ -93,7 +122,7 @@ fun ImageViewerOverlay(
                     .statusBarsPadding(),
             ) {
                 IconButton(
-                    onClick = onDismiss,
+                    onClick = { minimize() },
                     modifier = Modifier
                         .align(Alignment.TopStart)
                         .padding(4.dp),
@@ -122,7 +151,7 @@ fun ImageViewerOverlay(
 
 /** 单页大图：全量解码（源图已压到 ≤1280，内存可控）+ 手势缩放平移。 */
 @Composable
-private fun ViewerPage(path: String) {
+private fun ViewerPage(path: String, onTap: () -> Unit) {
     val context = LocalContext.current
     val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, path) {
         value = withContext(Dispatchers.IO) {
@@ -157,16 +186,19 @@ private fun ViewerPage(path: String) {
                         translationX = offset.x
                         translationY = offset.y
                     }
-                    // 双击：1x 与 2.5x 之间切换
+                    // 单击任意位置最小化；双击：1x 与 2.5x 之间切换
                     .pointerInput(bmp) {
-                        detectTapGestures(onDoubleTap = {
-                            if (scale > 1f) {
-                                scale = 1f
-                                offset = Offset.Zero
-                            } else {
-                                scale = 2.5f
-                            }
-                        })
+                        detectTapGestures(
+                            onTap = { onTap() },
+                            onDoubleTap = {
+                                if (scale > 1f) {
+                                    scale = 1f
+                                    offset = Offset.Zero
+                                } else {
+                                    scale = 2.5f
+                                }
+                            },
+                        )
                     }
                     // 缩放/平移：只有捏合或已放大时才消费手势，
                     // 未放大时单指拖动不消费，交给 Pager 翻页
