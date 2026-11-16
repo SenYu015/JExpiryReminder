@@ -3,6 +3,7 @@
 
 package com.jimmy.expiryreminder.ui
 
+import android.app.Activity
 import android.graphics.DashPathEffect
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -50,9 +52,11 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarDuration
@@ -65,6 +69,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -84,6 +89,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -129,6 +136,12 @@ import java.time.LocalDate
 
 private const val MAX_NOTE = 200
 
+/** 编辑页图片查看器的入参：[origin] 是发起点击的缩略图屏幕位置，用于展开/缩回转场。 */
+private data class EditViewerState(
+    val index: Int,
+    val origin: ImageOrigin?,
+)
+
 /** 参考稿样式编辑页：单张白色大卡 + 嵌套有效期分组 + 底部通栏保存。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -142,7 +155,10 @@ fun EditScreen(
     /** 新增时名称撞到已有物品，用户在相似列表里点选后跳去编辑那一条。 */
     onEditExisting: (String) -> Unit = {},
     onDone: () -> Unit,
+    /** 保存/删除成功后退出：不应模拟「返回手势」，走平台式淡入淡出。 */
+    onSaved: (() -> Unit)? = null,
 ) {
+    val finish = onSaved ?: onDone
     val context = LocalContext.current
     val store = ExpiryStore.get()
     val scope = rememberCoroutineScope()
@@ -205,8 +221,12 @@ fun EditScreen(
     var confirmDelete by remember { mutableStateOf(false) }
     // 自定义提前天数的弹窗开关
     var customDayDialog by remember { mutableStateOf(false) }
-    // 正在查看的图片下标：null = 查看器未打开
-    var viewerIndex by remember { mutableStateOf<Int?>(null) }
+    // 正在查看的图片：下标 + 发起点击的缩略图位置（用于展开/缩回转场）；null = 查看器未打开
+    var viewerState by remember { mutableStateOf<EditViewerState?>(null) }
+    // 每张缩略图在屏幕上的位置，布局时记录，点击看大图时取用。
+    // 圆角与缩略图一致（12dp），缩回终点才不会形状突变。
+    val thumbRadiusPx = with(LocalDensity.current) { 12.dp.toPx() }
+    val thumbOrigins = remember { mutableStateMapOf<Int, ImageOrigin>() }
 
     // ---------------------------------------------- 相似物品（防重复录入）
     // 只在新增模式检索：编辑已有物品时改名撞到别人，不算「重复录入」，不该打扰。
@@ -429,7 +449,7 @@ fun EditScreen(
                     Modifier
                         .fillMaxWidth()
                         .statusBarsPadding()
-                        .padding(start = 2.dp, end = 2.dp, top = 4.dp, bottom = 4.dp),
+                        .padding(start = 8.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     IconButton(onClick = onDone, modifier = Modifier.size(40.dp)) {
@@ -459,21 +479,18 @@ fun EditScreen(
                 Modifier
                     .weight(1f)
                     .verticalScroll(scrollState)
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
             ) {
                 // ============================================== 表单大卡（白底页面靠描边区分）
-                Surface(
-                    shape = RoundedCornerShape(16.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    border = androidx.compose.foundation.BorderStroke(
-                        1.dp, MaterialTheme.colorScheme.outline,
-                    ),
-                    modifier = Modifier.fillMaxWidth(),
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = 640.dp)
+                        .align(Alignment.CenterHorizontally),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    Column(
-                        Modifier.fillMaxWidth().padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp),
-                    ) {
+                    FormCard {
+                        EditSectionHeader("基本信息", "名称、空间与分类")
                         // -------------------------------------- 物品名称
                         // 标签行右侧挂相似物品徽标：输入框内右侧已被「清空 ×」占着，
                         // 两个小按钮并排容易误触，所以挪到框外标签行右端。
@@ -498,11 +515,53 @@ fun EditScreen(
                             value = name,
                             onValueChange = { name = it; nameFromOcr = false },
                             placeholder = "如：维生素 C、护照、牛奶",
-                            fixedHeight = 48.dp,
+                            fixedHeight = 52.dp,
                             modifier = Modifier.fillMaxWidth(),
                             focusRequester = nameFocus,
                             showClear = true,
                         )
+
+                        // 识别原文：离线 OCR 不准时可逐行核对，点一行补进备注
+                        val rawLines = prefill?.rawLines.orEmpty()
+                        if (rawLines.isNotEmpty()) {
+                            var showRaw by remember { mutableStateOf(false) }
+                            TextButton(onClick = { showRaw = !showRaw }) {
+                                Text(
+                                    if (showRaw) "收起识别原文（${rawLines.size} 行）"
+                                    else "查看识别原文（${rawLines.size} 行）",
+                                )
+                            }
+                            if (showRaw) {
+                                Column(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .background(
+                                            MaterialTheme.colorScheme.surfaceVariant,
+                                            RoundedCornerShape(8.dp),
+                                        )
+                                        .padding(8.dp),
+                                ) {
+                                    rawLines.forEach { line ->
+                                        Text(
+                                            line,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable {
+                                                    note = (if (note.isBlank()) line else "$note $line")
+                                                        .take(MAX_NOTE)
+                                                }
+                                                .padding(vertical = 3.dp),
+                                        )
+                                    }
+                                    Text(
+                                        "点任意一行可追加到备注",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
 
                         // 品名候选：文字长，用竖排单选而不是横排 chip
                         if (nameCandidates.size >= 2) {
@@ -652,6 +711,10 @@ fun EditScreen(
                                 },
                             )
                         }
+                    }
+
+                    FormCard {
+                        EditSectionHeader("日期与数量", "到期日期可由生产日期与有效期推算")
 
                         // -------------------------------------- 生产日期 / 有效期 / 单位
                         // 外层按左右两半分：生产日期占左半（与到期日期对齐），
@@ -687,7 +750,7 @@ fun EditScreen(
                                                 shelfLifeFromOcr = false
                                             },
                                             placeholder = "选填",
-                                            fixedHeight = 48.dp,
+                                            fixedHeight = 52.dp,
                                             modifier = Modifier.fillMaxWidth(),
                                             showClear = true,
                                             keyboardType = KeyboardType.Number,
@@ -785,6 +848,10 @@ fun EditScreen(
                                 )
                             }
                         }
+                    }
+
+                    FormCard {
+                        EditSectionHeader("提醒与补充")
 
                         // -------------------------------------- 提前提醒
                         FieldLabel("提前提醒")
@@ -811,6 +878,7 @@ fun EditScreen(
                             value = note,
                             onValueChange = { note = it.take(MAX_NOTE) },
                             placeholder = "存放位置、开封日期等",
+                            fixedHeight = 52.dp,
                             modifier = Modifier.fillMaxWidth(),
                             showClear = true,
                         )
@@ -904,7 +972,19 @@ fun EditScreen(
                                 Box(
                                     Modifier
                                         .clip(RoundedCornerShape(12.dp))
-                                        .clickable { viewerIndex = imgIndex },
+                                        .onGloballyPositioned { coords ->
+                                            val pos = coords.positionInWindow()
+                                            thumbOrigins[imgIndex] = ImageOrigin(
+                                                x = pos.x,
+                                                y = pos.y,
+                                                width = coords.size.width.toFloat(),
+                                                height = coords.size.height.toFloat(),
+                                                cornerRadius = thumbRadiusPx,
+                                            )
+                                        }
+                                        .clickable {
+                                            viewerState = EditViewerState(imgIndex, thumbOrigins[imgIndex])
+                                        },
                                 ) {
                                     val file = rememberFileForPath(img.path)
                                     if (file != null) {
@@ -950,6 +1030,11 @@ fun EditScreen(
             }
 
             // ---------------------------------------------- 底部固定保存栏
+            HorizontalDivider(
+                thickness = 1.dp,
+                color = MaterialTheme.colorScheme.outlineVariant,
+            )
+            Surface(color = MaterialTheme.colorScheme.surface) {
             Button(
                 onClick = {
                     val finalName = name.trim()
@@ -990,18 +1075,19 @@ fun EditScreen(
                     scope.launch {
                         if (existing == null) store.createItem(context, draft)
                         else store.updateItem(context, existing.id, draft)
-                        onDone()
+                        finish()
                     }
                 },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp)
-                    .height(50.dp),
-                shape = RoundedCornerShape(12.dp),
+                    .padding(horizontal = 16.dp, vertical = 14.dp)
+                    .height(54.dp),
+                shape = RoundedCornerShape(16.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.primary,
                 ),
             ) { Text(if (existing == null) "保存" else "保存", style = MaterialTheme.typography.titleMedium) }
+            }
         }
 
         // 底部浮层提示：贴在保存栏上方，几秒后自动消失，不占页面高度
@@ -1104,7 +1190,7 @@ fun EditScreen(
                     confirmDelete = false
                     scope.launch {
                         store.removeItem(context, existing.id)
-                        onDone()
+                        finish()
                     }
                 }) { Text("删除") }
             },
@@ -1162,11 +1248,12 @@ fun EditScreen(
     }
 
     // 全屏图片查看器：编辑中的草稿图片也能看（文件在入库时就已落盘）
-    viewerIndex?.let { idx ->
+    viewerState?.let { state ->
         ImageViewerOverlay(
             paths = images.map { it.path },
-            initialIndex = idx,
-            onDismiss = { viewerIndex = null },
+            initialIndex = state.index,
+            origin = state.origin,
+            onDismiss = { viewerState = null },
         )
     }
 }
@@ -1177,7 +1264,7 @@ fun EditScreen(
 @Composable
 private fun FieldLabel(text: String, optional: Boolean = false, ocrBadge: Boolean = false) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(text, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+        Text(text, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
         // 已由识别填入时不再标「选填」——两个标签挤在一行会看不清
         if (optional && !ocrBadge) {
             Spacer(Modifier.width(6.dp))
@@ -1931,4 +2018,53 @@ private fun Modifier.dashedBorder(color: Color, cornerRadius: Dp): Modifier = dr
         0f, 0f, size.width, size.height,
         cornerRadius.toPx(), cornerRadius.toPx(), paint,
     )
+}
+
+/** 分组卡片：统一圆角、浅描边与内边距，长表单拆开后不再是一整块白板。 */
+@Composable
+private fun FormCard(content: @Composable ColumnScope.() -> Unit) {
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 1.dp,
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f),
+        ),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            content = content,
+        )
+    }
+}
+
+/** 表单分组标题：主色文字 + 细分割线，把长表单切成三段，视觉层级更清楚。 */
+@Composable
+private fun EditSectionHeader(title: String, caption: String? = null) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                title,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.width(10.dp))
+            HorizontalDivider(
+                Modifier.weight(1f),
+                thickness = 1.dp,
+                color = MaterialTheme.colorScheme.outlineVariant,
+            )
+        }
+        if (!caption.isNullOrBlank()) {
+            Text(
+                caption,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+        }
+    }
 }

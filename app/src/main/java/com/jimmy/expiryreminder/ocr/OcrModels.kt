@@ -91,6 +91,8 @@ data class PrefillDraft(
     val manualExpire: Boolean = false,
     val dateCandidates: List<DateCandidate> = emptyList(),
     val images: List<ExpiryImage> = emptyList(),
+    /** 离线识别读到的原始文本行：识别不准时用户可在添加页核对并手动取用。 */
+    val rawLines: List<String> = emptyList(),
 ) {
     /** 一个字段都没识别出来——添加页只提示、不预填。 */
     val hasNothing: Boolean

@@ -62,6 +62,7 @@ fun OcrProgressScreen(
     var done by remember { mutableStateOf(0) }
     var failed by remember { mutableStateOf(0) }
     var skipped by remember { mutableStateOf(false) }
+    var lineCount by remember { mutableStateOf(0) }
     val total = uris.size
 
     BackHandler { onCancel() }
@@ -74,6 +75,8 @@ fun OcrProgressScreen(
         val nameGroups = mutableListOf<List<NameCandidate>>()
         val dateGroups = mutableListOf<List<DateCandidate>>()
         val shelfGroups = mutableListOf<List<ShelfLifeCandidate>>()
+        // 原始识别文本：识别不准时添加页能逐行核对、点一行补进备注
+        val rawLines = mutableListOf<String>()
 
         for ((index, uri) in uris.withIndex()) {
             if (skipped) break
@@ -84,16 +87,21 @@ fun OcrProgressScreen(
                 val (image, lines) = result
                 images += image
                 if (lines.isNotEmpty()) {
+                    for (line in lines) {
+                        val text = line.text.trim()
+                        if (text.isNotEmpty() && text !in rawLines) rawLines += text
+                    }
                     nameGroups += NameExtractor.extract(lines, index)
                     dateGroups += DateExtractor.extract(lines, index)
                     shelfGroups += DateExtractor.extractShelfLife(lines, index)
                 }
             }
             done = index + 1
+            lineCount = rawLines.size
         }
 
         val merged = ResultMerger.merge(nameGroups, dateGroups, shelfGroups)
-        onFinish(PrefillMapper.toDraft(merged, images))
+        onFinish(PrefillMapper.toDraft(merged, images, rawLines.take(80)))
     }
 
     Column(
@@ -126,6 +134,14 @@ fun OcrProgressScreen(
             Spacer(Modifier.height(10.dp))
             Text(
                 "$failed 张没有读出内容",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (lineCount > 0) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "已读出 $lineCount 行文字，添加页可核对原文",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

@@ -1,12 +1,27 @@
 package com.jimmy.expiryreminder.ui
 
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
 import com.jimmy.expiryreminder.core.isHexColor
+
+/**
+ * ColorOS 17 流体设计的近似落地：更大的圆角层级 + 浅色底，
+ * 让卡片像「浮」在纸面上，而不是硬边贴底。
+ */
+private val AppShapes = Shapes(
+    extraSmall = RoundedCornerShape(8.dp),
+    small = RoundedCornerShape(12.dp),
+    medium = RoundedCornerShape(18.dp),
+    large = RoundedCornerShape(24.dp),
+    extraLarge = RoundedCornerShape(28.dp),
+)
 
 /**
  * 以蓝色为主色，并补全中性色层级：
@@ -23,11 +38,12 @@ private val LightColors = lightColorScheme(
     onTertiary = Color(0xFF3D2B00),
     error = Color(0xFFF56C6C),
     onError = Color.White,
-    background = Color(0xFFFFFFFF),
+    // 浅蓝白底：卡片纯白浮在上面，接近 ColorOS 17 的柔和层次
+    background = Color(0xFFF7FAFE),
     onBackground = Color(0xFF1F2D3D),
     surface = Color(0xFFFFFFFF),
     onSurface = Color(0xFF1F2D3D),
-    surfaceVariant = Color(0xFFF2F4F7),
+    surfaceVariant = Color(0xFFF2F6FB),
     onSurfaceVariant = Color(0xFF6B7280),
     // 白底页面下卡片靠描边区分，描边略加深保证可见
     outline = Color(0xFFE1E6ED),
@@ -76,6 +92,7 @@ fun AppTheme(themeMode: String, content: @Composable () -> Unit) {
     }
     MaterialTheme(
         colorScheme = if (dark) DarkColors else LightColors,
+        shapes = AppShapes,
         content = content,
     )
 }
