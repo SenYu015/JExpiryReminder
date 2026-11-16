@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  debug 包专用覆盖版本：debug 的 applicationId 带 .debug 后缀，
+  静态快捷方式的 targetPackage 必须跟着改，否则长按图标点了会去打开发布版。
+  内容必须与 src/main/res/xml/shortcuts.xml 保持一致，只有包名不同。
+-->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_add"
+        android:shortcutId="quick_add"
+        android:shortcutLongLabel="@string/shortcut_add_long"
+        android:shortcutShortLabel="@string/shortcut_add_short">
+        <intent
+            android:action="com.jimmy.expiryreminder.action.SHORTCUT_ADD"
+            android:targetClass="com.jimmy.expiryreminder.MainActivity"
+            android:targetPackage="com.jimmy.expiryreminder.debug">
+            <extra
+                android:name="shortcut"
+                android:value="add" />
+        </intent>
+    </shortcut>
+
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_camera"
+        android:shortcutId="quick_camera"
+        android:shortcutLongLabel="@string/shortcut_camera_long"
+        android:shortcutShortLabel="@string/shortcut_camera_short">
+        <intent
+            android:action="com.jimmy.expiryreminder.action.SHORTCUT_CAMERA"
+            android:targetClass="com.jimmy.expiryreminder.MainActivity"
+            android:targetPackage="com.jimmy.expiryreminder.debug">
+            <extra
+                android:name="shortcut"
+                android:value="camera" />
+        </intent>
+    </shortcut>
+
+</shortcuts>

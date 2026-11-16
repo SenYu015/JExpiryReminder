@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">到期提醒</string>
+
+    <!-- 桌面图标长按快捷方式（res/xml/shortcuts.xml） -->
+    <string name="shortcut_add_short">新增物品</string>
+    <string name="shortcut_add_long">新增一件到期物品</string>
+    <string name="shortcut_camera_short">拍照识别</string>
+    <string name="shortcut_camera_long">拍照识别包装上的日期</string>
 </resources>

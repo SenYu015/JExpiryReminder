@@ -1,6 +1,7 @@
 package com.jimmy.expiryreminder
 
 import android.Manifest
+import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -56,6 +57,44 @@ class MainActivity : ComponentActivity() {
 
     val appScope get() = (application as App).appScope
 
+    companion object {
+        /**
+         * 长按桌面图标的快捷方式带入的标识（见 res/xml/shortcuts.xml）。
+         * 快捷方式 XML 的 extra 只能是字符串，所以这里统一用 getStringExtra 读取。
+         */
+        const val EXTRA_SHORTCUT = "shortcut"
+
+        /** 快捷方式：直接进新增页。 */
+        const val SHORTCUT_ADD = "add"
+
+        /** 快捷方式：直接进选图（拍照）页。 */
+        const val SHORTCUT_CAMERA = "camera"
+    }
+
+    /**
+     * 应用已在运行时再次收到启动 Intent（长按桌面快捷方式）走这里。
+     * 用 State 而非直接设置 screen：screen 是 Compose 内部 rememberSaveable 状态，
+     * 由 setContent 里的 LaunchedEffect 消费后再清空，等价于「一次性跳转指令」。
+     */
+    private val pendingNav = mutableStateOf<Intent?>(null)
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // 覆盖 Activity.intent，避免后续读取到上一次的旧 extra
+        setIntent(intent)
+        pendingNav.value = intent
+    }
+
+    /** 把启动 Intent 翻译成目标页面；普通点图标启动返回 null（停在主页）。 */
+    private fun resolveScreen(intent: Intent?): Screen? {
+        if (intent == null) return null
+        return when (intent.getStringExtra(EXTRA_SHORTCUT)) {
+            SHORTCUT_ADD -> Screen.Edit(itemId = null)
+            SHORTCUT_CAMERA -> Screen.PickImages()
+            else -> null
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // 声明 edge-to-edge，并把系统栏图标外观跟随应用主题：
@@ -101,7 +140,17 @@ class MainActivity : ComponentActivity() {
             AppTheme(themeMode.name) {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     var screen by rememberSaveable(stateSaver = ScreenSaver) {
-                        mutableStateOf<Screen>(Screen.Home)
+                        // 冷启动首屏由启动 Intent 决定：长按图标的快捷方式。
+                        // 应用已运行时的二次触发走 onNewIntent → pendingNav（见下）。
+                        mutableStateOf(resolveScreen(intent) ?: Screen.Home)
+                    }
+                    // 应用已在前台时点快捷方式不会重建 Activity，系统走 onNewIntent，
+                    // 这里消费掉这条「一次性跳转指令」再清空。
+                    val navIntent by pendingNav
+                    LaunchedEffect(navIntent) {
+                        val target = resolveScreen(navIntent) ?: return@LaunchedEffect
+                        screen = target
+                        pendingNav.value = null
                     }
                     // 筛选状态放在导航层：进出编辑/设置页回来仍然是上次的搜索词与分类
                     val homeFilter = rememberSaveable(saver = HomeFilterState.Saver) {
