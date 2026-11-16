@@ -15,7 +15,11 @@ import java.time.temporal.ChronoUnit
  */
 object PrefillMapper {
 
-    fun toDraft(merged: ResultMerger.Merged, images: List<ExpiryImage> = emptyList()): PrefillDraft {
+    fun toDraft(
+        merged: ResultMerger.Merged,
+        images: List<ExpiryImage> = emptyList(),
+        rawLines: List<String> = emptyList(),
+    ): PrefillDraft {
         val bestName = merged.names.firstOrNull()
         val category = bestName?.let { CategoryGuesser.guess(it.text) }
 
@@ -81,6 +85,7 @@ object PrefillMapper {
             manualExpire = manualExpire,
             dateCandidates = merged.dates,
             images = images,
+            rawLines = rawLines,
         )
     }
 

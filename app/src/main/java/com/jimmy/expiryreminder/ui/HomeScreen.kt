@@ -6,7 +6,6 @@ package com.jimmy.expiryreminder.ui
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
-import android.os.SystemClock
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
@@ -18,6 +17,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -32,15 +32,19 @@ import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -49,6 +53,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -67,6 +72,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -79,6 +85,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -90,17 +97,28 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChangeIgnoreConsumed
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.jimmy.expiryreminder.core.Dates
 import com.jimmy.expiryreminder.core.ExpiryItem
@@ -147,6 +165,13 @@ class HomeFilterState(
     }
 }
 
+/** 首页图片查看器的入参：[origin] 是发起点击的缩略图在屏幕上的位置，用于展开/缩回转场。 */
+private data class ViewerState(
+    val paths: List<String>,
+    val index: Int,
+    val origin: ImageOrigin?,
+)
+
 /** 参考稿样式首页：白底标题区 + 统计卡 + 搜索/筛选 + 状态分组列表。
  *
  * [filter] 由调用方持有，保证切页回来筛选不丢；
@@ -189,31 +214,22 @@ fun HomeScreen(
     var shareSpaceDialog by remember { mutableStateOf(false) }
     var categoryMenuOpen by remember { mutableStateOf(false) }
     var spaceMenuOpen by remember { mutableStateOf(false) }
-    // 全屏图片查看器：paths + 起始下标，null = 未打开
-    var viewer by remember { mutableStateOf<Pair<List<String>, Int>?>(null) }
+    // 全屏图片查看器：图片路径 + 起始下标 + 发起点击的缩略图位置，null = 未打开
+    var viewer by remember { mutableStateOf<ViewerState?>(null) }
 
-    // 多选态下返回 = 退出多选；主页返回 = 两次才退出（防误触）
-    var lastBackAt by remember { mutableStateOf(0L) }
-    BackHandler(enabled = true) {
-        if (selectMode) {
-            selectMode = false
-            selected = emptySet()
-            lastBackAt = 0L
-        } else {
-            val now = SystemClock.elapsedRealtime()
-            if (now - lastBackAt <= 2000L) {
-                context.findActivity()?.finish()
-            } else {
-                lastBackAt = now
-                Toast.makeText(context, "再按一次返回键退出", Toast.LENGTH_SHORT).show()
-            }
-        }
+    // 只在多选态拦截返回；主页本身不拦截，交给系统处理，
+    // 这样「返回桌面」才能走 ColorOS 的预测性返回动画（缩小到桌面图标）。
+    BackHandler(enabled = selectMode) {
+        selectMode = false
+        selected = emptySet()
     }
 
     // 数据就绪后同步一次排程（新增/修改/删除都会经 store，这里兜底）
     LaunchedEffect(state.items, notifyEnabled, notifyTime, useAlarmClock) {
         if (state.loaded) {
-            ReminderService.syncScheduled(context, store, notifyEnabled, notifyTime, useAlarmClock)
+            ReminderService.syncScheduled(
+                context, store, notifyEnabled, notifyTime, useAlarmClock,
+            )
         }
     }
 
@@ -327,10 +343,44 @@ fun HomeScreen(
         it != Spaces.ALL && it.isNotEmpty() && store.spaceOf(it) != null
     }
 
+    // ------------------------------- 顶部磨砂 / 底部浮动：高度测量与滚动进度
+    val density = LocalDensity.current
+    val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    var topBarHeightPx by remember { mutableIntStateOf(0) }
+    // 遮罩强度只跟滚动距离有关：滚到顶 0（完全透明，露出干净底色），往下 28dp 内就升满。
+    // 上升区间必须短——内容刚进入遮罩时如果遮罩还是半透明，标题就会和背后的列表文字重影；
+    // 一旦升满，真正的淡出交给遮罩自身的竖渐变（底部全透明）去完成。
+    // 不做补间动画，值在 draw 阶段才读——滚动时只重绘、不重组，跟手且不掉帧。
+    val frostSpanPx = with(density) { 28.dp.toPx() }
+    val frostAlpha: () -> Float = {
+        when {
+            selectMode -> 1f
+            listState.firstVisibleItemIndex > 0 -> 1f
+            else -> (listState.firstVisibleItemScrollOffset / frostSpanPx).coerceIn(0f, 1f)
+        }
+    }
+    val frostColor = MaterialTheme.colorScheme.background
+    // 遮罩向下多铺一小段（24dp）露出淡出带：列表第一条正好从这段之后开始，
+    // 静止时不会被压白，滚动时卡片就是在这 24dp 里由清晰过渡到消失
+    val maskTail = 12.dp
+    // 内容让位：固定块 + 淡出带；底部留出浮动条高度（都以实测为准，换字号也不会错位）
+    val topContentPadding = if (topBarHeightPx > 0) {
+        with(density) { topBarHeightPx.toDp() } + maskTail
+    } else {
+        statusTop + 92.dp + maskTail
+    }
+    // 底部浮动条高度是固定 dp（54/52/58 取最高 + 上下 12dp 内边距），不随字号变化，
+    // 所以直接算常量，省一次测量回调；再留 24dp 余量，最后一条不会贴到按钮上
+    val bottomContentPadding = if (selectMode) 16.dp else navBottom + 94.dp
+
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
+        // 顶部磨砂头与底部浮动条都要「压」在内容上，内容必须能滚到状态栏/导航栏底下，
+        // 所以系统栏内边距自己接管，不让 Scaffold 先把内容区裁开
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
-            // 多选态下藏起搜索栏与新增/识别，底部改放批量操作
+            // 多选态的批量操作条仍然占位，不做浮动
             if (selectMode) {
                 SelectionActionBar(
                     canAct = selected.isNotEmpty(),
@@ -344,215 +394,393 @@ fun HomeScreen(
                     },
                     onDelete = { batchDeleteDialog = true },
                 )
-            } else {
-                HomeBottomBar(
-                    keyword = filter.keyword,
-                    onKeywordChange = { filter.keyword = it },
-                    onOcr = { onOcr(targetCategory, targetSpace) },
-                    onAdd = { onAdd(targetCategory, targetSpace) },
-                )
             }
         },
     ) { padding ->
-        Column(
+        Box(
             Modifier
                 .padding(padding)
-                .fillMaxSize()
-                // 整页右滑切上一个分类；左滑不接管，列表行照旧左滑删除
-                .swipeRightToSwitchCategory { if (!selectMode) switchCategory(-1) },
+                .fillMaxSize(),
         ) {
-            // ---------------------------------------------- 头部
-            if (selectMode) {
-                Surface(color = MaterialTheme.colorScheme.background) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        IconButton(onClick = { selectMode = false; selected = emptySet() }) {
-                            Icon(Icons.Filled.Close, contentDescription = "退出多选")
-                        }
-                        Text(
-                            "已选 ${selected.size} 项",
-                            style = MaterialTheme.typography.titleMedium,
-                            modifier = Modifier.weight(1f),
-                        )
-                        // 全选/取消全选：列表当前筛选结果里的全部物品
-                        TextButton(
-                            onClick = {
-                                val all = filtered.map { it.id }.toSet()
-                                selected = if (selected.containsAll(all) && all.isNotEmpty()) {
-                                    emptySet()
-                                } else {
-                                    all
-                                }
-                            },
+            // ---------------------------------------------- 整页一个滚动容器
+            // 只有列表在这条 LazyColumn 里滚；标题、统计卡、分类行都是上方固定块，
+            // 列表滚到固定块下面时被遮罩逐级淡出。
+            LazyColumn(
+                Modifier
+                    .fillMaxSize()
+                    .categorySlide({ slide.value }, slideShiftPx)
+                    // 整页右滑切上一个分类；左滑不接管，列表行照旧左滑删除
+                    .swipeRightToSwitchCategory { if (!selectMode) switchCategory(-1) },
+                state = listState,
+                contentPadding = PaddingValues(
+                    start = 16.dp,
+                    end = 16.dp,
+                    top = topContentPadding,
+                    bottom = bottomContentPadding,
+                ),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                // ---------------------------------------------- 列表 / 空态
+                if (filtered.isEmpty()) {
+                    // 空态与列表共用同一套进场动画，切到没有记录的分类时同样有「翻过去了」的反馈
+                    item(key = "empty") {
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .fillParentMaxHeight(0.66f),
+                            contentAlignment = Alignment.Center,
                         ) {
-                            val all = filtered.map { it.id }.toSet()
-                            Text(if (selected.containsAll(all) && all.isNotEmpty()) "取消全选" else "全选")
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Box(
+                                    Modifier
+                                        .size(64.dp)
+                                        .background(
+                                            MaterialTheme.colorScheme.surfaceVariant, CircleShape,
+                                        ),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Icon(
+                                        Icons.Filled.DateRange,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.outline,
+                                        modifier = Modifier.size(28.dp),
+                                    )
+                                }
+                                Spacer(Modifier.height(12.dp))
+                                Text(
+                                    if (state.loaded) "暂无物品" else "加载中…",
+                                    style = MaterialTheme.typography.titleMedium,
+                                )
+                                if (state.loaded) {
+                                    Spacer(Modifier.height(4.dp))
+                                    Text(
+                                        "点底部 + 添加第一件物品",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
                         }
                     }
-                }
-            } else {
-                Surface(color = MaterialTheme.colorScheme.background) {
-                    // 与页面底色一致，状态栏、头部、正文连成一片，避免割裂
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(start = 16.dp, end = 4.dp, top = 12.dp, bottom = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                "到期提醒",
-                                style = MaterialTheme.typography.headlineSmall,
-                                fontWeight = FontWeight.Bold,
-                            )
-                            Spacer(Modifier.height(2.dp))
-                            Text(
-                                "食品、药品、证件的有效期管理",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        // 空间切换：当前空间名 + 下拉（同时是空间管理的入口）
-                        Box {
-                            Surface(
-                                onClick = { spaceMenuOpen = true },
-                                shape = RoundedCornerShape(10.dp),
-                                color = MaterialTheme.colorScheme.surface,
-                                border = androidx.compose.foundation.BorderStroke(
-                                    1.dp, MaterialTheme.colorScheme.outline,
-                                ),
+                } else {
+                    grouped.forEach { (status, items) ->
+                        item(key = "header_${status.name}") {
+                            Row(
+                                Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Row(
-                                    Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Box(
-                                        Modifier
-                                            .size(8.dp)
-                                            .background(
-                                                hexColor(store.spaceColorOf(filter.space)),
-                                                CircleShape,
-                                            ),
-                                    )
-                                    Spacer(Modifier.width(6.dp))
-                                    Text(
-                                        store.spaceLabelOf(filter.space),
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.widthIn(max = 88.dp),
-                                    )
-                                    Spacer(Modifier.width(2.dp))
-                                    Icon(
-                                        Icons.Filled.KeyboardArrowDown,
-                                        contentDescription = "切换空间",
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(16.dp),
-                                    )
-                                }
-                            }
-                            DropdownMenu(
-                                expanded = spaceMenuOpen,
-                                onDismissRequest = { spaceMenuOpen = false },
-                                shape = RoundedCornerShape(12.dp),
-                            ) {
-                                // 全部空间（默认）：所有空间 + 未分配的物品一起看
-                                DropdownMenuItem(
-                                    text = { Text(Spaces.ALL_LABEL) },
-                                    leadingIcon = {
-                                        Box(
-                                            Modifier.size(10.dp).background(
-                                                hexColor(store.spaceColorOf(Spaces.ALL)),
-                                                RoundedCornerShape(5.dp),
-                                            )
-                                        )
-                                    },
-                                    trailingIcon = { CountBadge(store.itemCountInSpace(Spaces.ALL)) },
-                                    onClick = {
-                                        if (filter.space != Spaces.ALL) {
-                                            filter.space = Spaces.ALL
-                                            filter.category = HomeFilterState.ALL
-                                        }
-                                        spaceMenuOpen = false
-                                    },
+                                Box(
+                                    Modifier
+                                        .size(8.dp)
+                                        .background(hexColor(status.color), CircleShape),
                                 )
-                                androidx.compose.material3.HorizontalDivider()
-                                for (space in store.spaceOptions()) {
-                                    DropdownMenuItem(
-                                        text = { Text(space.label) },
-                                        leadingIcon = {
-                                            Box(
-                                                Modifier.size(10.dp).background(
-                                                    hexColor(space.color), RoundedCornerShape(5.dp),
-                                                )
-                                            )
-                                        },
-                                        trailingIcon = {
-                                            CountBadge(store.itemCountInSpace(space.id))
-                                        },
-                                        onClick = {
-                                            if (filter.space != space.id) {
-                                                filter.space = space.id
-                                                // 分类计数跟着空间变，切空间后回到「全部分类」最不容易迷惑
-                                                filter.category = HomeFilterState.ALL
-                                            }
-                                            spaceMenuOpen = false
-                                        },
-                                    )
-                                }
-                                androidx.compose.material3.HorizontalDivider()
-                                // 未分配：物品可以不属于任何空间
-                                DropdownMenuItem(
-                                    text = { Text(Spaces.UNASSIGNED_LABEL) },
-                                    leadingIcon = {
-                                        Box(
-                                            Modifier.size(10.dp).background(
-                                                hexColor(store.spaceColorOf("")),
-                                                RoundedCornerShape(5.dp),
-                                            )
-                                        )
-                                    },
-                                    trailingIcon = { CountBadge(store.itemCountInSpace("")) },
-                                    onClick = {
-                                        if (filter.space.isNotEmpty()) {
-                                            filter.space = ""
-                                            filter.category = HomeFilterState.ALL
-                                        }
-                                        spaceMenuOpen = false
-                                    },
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    status.label,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
-                                androidx.compose.material3.HorizontalDivider()
-                                DropdownMenuItem(
-                                    text = { Text("按空间分享…") },
-                                    onClick = {
-                                        spaceMenuOpen = false
-                                        shareSpaceDialog = true
-                                    },
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("管理空间…") },
-                                    onClick = {
-                                        spaceMenuOpen = false
-                                        onSpaces()
-                                    },
+                                Spacer(Modifier.weight(1f))
+                                Text(
+                                    "${items.size}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
                         }
-                        IconButton(onClick = onSettings) {
-                            Icon(Icons.Filled.Settings, contentDescription = "设置")
+                        items(items.size, key = { items[it].id }) { index ->
+                            val item = items[index]
+                            // 新增/删除/移动时条目自带位移动画，接近流体动效的连续感
+                            Box(Modifier.animateItem()) {
+                                ItemRow(
+                                    item = item,
+                                    store = store,
+                                    selectMode = selectMode,
+                                    selected = item.id in selected,
+                                    showSpace = filter.space == Spaces.ALL,
+                                    onClick = {
+                                        if (selectMode) {
+                                            selected =
+                                                if (item.id in selected) selected - item.id
+                                                else selected + item.id
+                                        } else onEdit(item.id)
+                                    },
+                                    onLongClick = {
+                                        if (!selectMode) {
+                                            selectMode = true
+                                            selected = setOf(item.id)
+                                        }
+                                    },
+                                    onSwipeDelete = { pendingDelete = item },
+                                    onViewImages = { origin ->
+                                        viewer = ViewerState(item.images.map { it.path }, 0, origin)
+                                    },
+                                )
+                            }
                         }
                     }
                 }
             }
 
-            Column(Modifier.padding(horizontal = 16.dp)) {
+            // ---------------------------------------------- 顶部固定遮罩（渐变淡出）
+            // 固定在页面顶部，本身是一条贯穿的竖向渐变：顶端不透明，向下逐级变淡，
+            // 到遮罩底缘完全透明。内容滚进来时被逐级「吃掉」，是连续淡出而不是撞上一条边界。
+            Column(
+                Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .onGloballyPositioned { topBarHeightPx = it.size.height }
+                    .drawBehind {
+                        val a = frostAlpha()
+                        if (a <= 0f) return@drawBehind
+                        // 固定块高度 = 遮罩的实心主体；再向下多铺 maskTail 做过渡带，
+                        // 淡化全在过渡带里完成，固定块里的文字始终压在足够实的底上，读得清。
+                        val total = size.height + maskTail.toPx()
+                        // 一条从遮罩底缘往上连续变实的曲线（smoothstep）：底缘全透明，
+                        // 约 120dp 内平滑收满，再往上保持不透明。
+                        // 不用「实心段 + 16dp 突然淡出」的硬分段，也不会让中段太透、
+                        // 把固定块后面的列表卡片透出来。
+                        fun ss(x: Float): Float = x * x * (3f - 2f * x)
+                        // 渐变带高度：固定块下缘 40dp + 向下多铺的 12dp，
+                        // 上方的统计卡、副标题保持全实，不会透出背后的列表
+                        val fadePx = 52.dp.toPx()
+                        val frac = (fadePx / total).coerceIn(0.05f, 1f)
+                        drawRect(
+                            brush = Brush.verticalGradient(
+                                *(0..8).map { i ->
+                                    val t = i / 8f              // 0 = 遮罩顶部，1 = 遮罩底缘
+                                    val u = 1f - t              // 距底缘的比例
+                                    t to frostColor.copy(
+                                        alpha = a * ss((u / frac).coerceIn(0f, 1f)),
+                                    )
+                                }.toTypedArray()
+                            ),
+                            size = Size(size.width, total),
+                        )
+                    },
+            ) {
+                Box(Modifier.fillMaxWidth()) {
+                    if (selectMode) {
+                        // ---------------------------------- 多选态头部
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .statusBarsPadding()
+                                .padding(horizontal = 4.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            IconButton(onClick = { selectMode = false; selected = emptySet() }) {
+                                Icon(Icons.Filled.Close, contentDescription = "退出多选")
+                            }
+                            Text(
+                                "已选 ${selected.size} 项",
+                                style = MaterialTheme.typography.titleMedium,
+                                modifier = Modifier.weight(1f),
+                            )
+                            // 全选/取消全选：列表当前筛选结果里的全部物品
+                            TextButton(
+                                onClick = {
+                                    val all = filtered.map { it.id }.toSet()
+                                    selected = if (selected.containsAll(all) && all.isNotEmpty()) {
+                                        emptySet()
+                                    } else {
+                                        all
+                                    }
+                                },
+                            ) {
+                                val all = filtered.map { it.id }.toSet()
+                                Text(
+                                    if (selected.containsAll(all) && all.isNotEmpty()) "取消全选"
+                                    else "全选"
+                                )
+                            }
+                        }
+                    } else {
+                        // ---------------------------------- 常规头部：标题 + 空间 + 设置
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .statusBarsPadding()
+                                .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 10.dp),
+                        ) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    "到期提醒",
+                                    style = MaterialTheme.typography.headlineMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                // 标题块与右侧按钮组之间留固定呼吸位，标题长短都不挤在一起
+                                Spacer(Modifier.width(12.dp))
+                                // 空间切换：当前空间名 + 下拉（同时是空间管理的入口）
+                                Box {
+                                    Surface(
+                                        onClick = { spaceMenuOpen = true },
+                                        shape = RoundedCornerShape(20.dp),
+                                        color = MaterialTheme.colorScheme.surface,
+                                        shadowElevation = 2.dp,
+                                        border = androidx.compose.foundation.BorderStroke(
+                                            1.dp, MaterialTheme.colorScheme.outlineVariant,
+                                        ),
+                                        modifier = Modifier.height(40.dp),
+                                    ) {
+                                        Row(
+                                            Modifier.padding(horizontal = 12.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                        ) {
+                                            Box(
+                                                Modifier
+                                                    .size(8.dp)
+                                                    .background(
+                                                        hexColor(store.spaceColorOf(filter.space)),
+                                                        CircleShape,
+                                                    ),
+                                            )
+                                            Spacer(Modifier.width(6.dp))
+                                            Text(
+                                                store.spaceLabelOf(filter.space),
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.widthIn(max = 84.dp),
+                                            )
+                                            Spacer(Modifier.width(2.dp))
+                                            Icon(
+                                                Icons.Filled.KeyboardArrowDown,
+                                                contentDescription = "切换空间",
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.size(16.dp),
+                                            )
+                                        }
+                                    }
+                                    DropdownMenu(
+                                        expanded = spaceMenuOpen,
+                                        onDismissRequest = { spaceMenuOpen = false },
+                                        shape = RoundedCornerShape(12.dp),
+                                    ) {
+                                        // 全部空间（默认）：所有空间 + 未分配的物品一起看
+                                        DropdownMenuItem(
+                                            text = { Text(Spaces.ALL_LABEL) },
+                                            leadingIcon = {
+                                                Box(
+                                                    Modifier.size(10.dp).background(
+                                                        hexColor(store.spaceColorOf(Spaces.ALL)),
+                                                        RoundedCornerShape(5.dp),
+                                                    )
+                                                )
+                                            },
+                                            trailingIcon = { CountBadge(store.itemCountInSpace(Spaces.ALL)) },
+                                            onClick = {
+                                                if (filter.space != Spaces.ALL) {
+                                                    filter.space = Spaces.ALL
+                                                    filter.category = HomeFilterState.ALL
+                                                }
+                                                spaceMenuOpen = false
+                                            },
+                                        )
+                                        androidx.compose.material3.HorizontalDivider()
+                                        for (space in store.spaceOptions()) {
+                                            DropdownMenuItem(
+                                                text = { Text(space.label) },
+                                                leadingIcon = {
+                                                    Box(
+                                                        Modifier.size(10.dp).background(
+                                                            hexColor(space.color), RoundedCornerShape(5.dp),
+                                                        )
+                                                    )
+                                                },
+                                                trailingIcon = {
+                                                    CountBadge(store.itemCountInSpace(space.id))
+                                                },
+                                                onClick = {
+                                                    if (filter.space != space.id) {
+                                                        filter.space = space.id
+                                                        // 分类计数跟着空间变，切空间后回到「全部分类」最不容易迷惑
+                                                        filter.category = HomeFilterState.ALL
+                                                    }
+                                                    spaceMenuOpen = false
+                                                },
+                                            )
+                                        }
+                                        androidx.compose.material3.HorizontalDivider()
+                                        // 未分配：物品可以不属于任何空间
+                                        DropdownMenuItem(
+                                            text = { Text(Spaces.UNASSIGNED_LABEL) },
+                                            leadingIcon = {
+                                                Box(
+                                                    Modifier.size(10.dp).background(
+                                                        hexColor(store.spaceColorOf("")),
+                                                        RoundedCornerShape(5.dp),
+                                                    )
+                                                )
+                                            },
+                                            trailingIcon = { CountBadge(store.itemCountInSpace("")) },
+                                            onClick = {
+                                                if (filter.space.isNotEmpty()) {
+                                                    filter.space = ""
+                                                    filter.category = HomeFilterState.ALL
+                                                }
+                                                spaceMenuOpen = false
+                                            },
+                                        )
+                                        androidx.compose.material3.HorizontalDivider()
+                                        DropdownMenuItem(
+                                            text = { Text("按空间分享…") },
+                                            onClick = {
+                                                spaceMenuOpen = false
+                                                shareSpaceDialog = true
+                                            },
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("管理空间…") },
+                                            onClick = {
+                                                spaceMenuOpen = false
+                                                onSpaces()
+                                            },
+                                        )
+                                    }
+                                }
+                                // 与「全部空间」胶囊之间留 10dp：两颗都是 40dp 高，视觉上成组但不相连
+                                Spacer(Modifier.width(10.dp))
+                                Surface(
+                                    onClick = onSettings,
+                                    shape = CircleShape,
+                                    color = MaterialTheme.colorScheme.surface,
+                                    shadowElevation = 2.dp,
+                                    border = androidx.compose.foundation.BorderStroke(
+                                        1.dp, MaterialTheme.colorScheme.outlineVariant,
+                                    ),
+                                    modifier = Modifier.size(40.dp),
+                                ) {
+                                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            Icons.Filled.Settings,
+                                            contentDescription = "设置",
+                                            tint = MaterialTheme.colorScheme.onSurface,
+                                            modifier = Modifier.size(20.dp),
+                                        )
+                                    }
+                                }
+                            }
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                "食品、药品、证件的有效期管理",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
                 // ------------------------------------------ 统计卡（数量与种类由设置决定）
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .padding(top = 12.dp),
+                        .padding(start = 16.dp, end = 16.dp, top = 10.dp),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     // 4 张及以上收窄内边距和字号，保证 5 张也能一行放得下
@@ -569,24 +797,22 @@ fun HomeScreen(
                     }
                 }
 
+
                 // ------------------------------------------ 分类切换器 + 分类/多选
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .padding(top = 10.dp),
+                        .padding(start = 16.dp, end = 16.dp, top = 14.dp),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     // 分类下拉：点开菜单直选。切换分类靠整页右滑，这里不再放左右箭头
                     Box(Modifier.weight(1f)) {
-                        Surface(
-                            onClick = { categoryMenuOpen = true },
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(10.dp),
-                            color = MaterialTheme.colorScheme.surface,
-                            border = androidx.compose.foundation.BorderStroke(
-                                1.dp, MaterialTheme.colorScheme.outline,
-                            ),
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .frostedPanel()
+                                .clickable { categoryMenuOpen = true },
                         ) {
                             Row(
                                 Modifier
@@ -658,11 +884,11 @@ fun HomeScreen(
                         }
                     }
 
-                    // 分类管理（独立页面）
-                    Surface(
-                        onClick = onCategories,
-                        shape = RoundedCornerShape(10.dp),
-                        color = Color(0xFF67C23A),
+                    // 分类管理（独立页面）：与搜索框同一套磨砂浮起效果
+                    Box(
+                        Modifier
+                            .frostedPanel()
+                            .clickable(onClick = onCategories),
                     ) {
                         Row(
                             Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
@@ -670,7 +896,7 @@ fun HomeScreen(
                         ) {
                             Text(
                                 "分类管理",
-                                color = Color.White,
+                                color = MaterialTheme.colorScheme.primary,
                                 style = MaterialTheme.typography.bodyMedium,
                                 maxLines = 1,
                             )
@@ -680,23 +906,23 @@ fun HomeScreen(
                     // 多选 / 退出多选（同一颗按钮切换）
                     val accent = if (selectMode) MaterialTheme.colorScheme.error
                     else MaterialTheme.colorScheme.primary
-                    Surface(
-                        onClick = {
-                            if (selectMode) {
-                                selectMode = false
-                                selected = emptySet()
-                            } else {
-                                selectMode = true
-                            }
-                        },
-                        shape = RoundedCornerShape(10.dp),
-                        color = if (selectMode) MaterialTheme.colorScheme.errorContainer
-                        else MaterialTheme.colorScheme.surface,
-                        border = androidx.compose.foundation.BorderStroke(
-                            1.dp,
-                            if (selectMode) MaterialTheme.colorScheme.error
-                            else MaterialTheme.colorScheme.outline,
-                        ),
+                    Box(
+                        Modifier
+                            .frostedPanel(
+                                borderColor = if (selectMode) {
+                                    MaterialTheme.colorScheme.error
+                                } else {
+                                    Color.White.copy(alpha = 0.55f)
+                                },
+                            )
+                            .clickable {
+                                if (selectMode) {
+                                    selectMode = false
+                                    selected = emptySet()
+                                } else {
+                                    selectMode = true
+                                }
+                            },
                     ) {
                         Row(
                             Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
@@ -718,116 +944,18 @@ fun HomeScreen(
                 }
             }
 
-            // ---------------------------------------------- 列表
-            if (filtered.isEmpty()) {
-                // 空态与列表共用同一套进场动画，切到没有记录的分类时同样有「翻过去了」的反馈
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .categorySlide({ slide.value }, slideShiftPx)
-                        .padding(bottom = 24.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Box(
-                            Modifier
-                                .size(64.dp)
-                                .background(
-                                    MaterialTheme.colorScheme.surfaceVariant, CircleShape,
-                                ),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Icon(
-                                Icons.Filled.DateRange,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.outline,
-                                modifier = Modifier.size(28.dp),
-                            )
-                        }
-                        Spacer(Modifier.height(12.dp))
-                        Text(
-                            if (state.loaded) "暂无物品" else "加载中…",
-                            style = MaterialTheme.typography.titleMedium,
-                        )
-                        if (state.loaded) {
-                            Spacer(Modifier.height(4.dp))
-                            Text(
-                                "点底部 + 添加第一件物品",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-                }
-            } else {
-                LazyColumn(
-                    Modifier
-                        .fillMaxSize()
-                        .categorySlide({ slide.value }, slideShiftPx),
-                    state = listState,
-                    contentPadding = PaddingValues(
-                        start = 16.dp, end = 16.dp, top = 6.dp, bottom = 12.dp,
-                    ),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    grouped.forEach { (status, items) ->
-                        item(key = "header_${status.name}") {
-                            Row(
-                                Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 2.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Box(
-                                    Modifier
-                                        .size(8.dp)
-                                        .background(hexColor(status.color), CircleShape),
-                                )
-                                Spacer(Modifier.width(6.dp))
-                                Text(
-                                    status.label,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                                Spacer(Modifier.weight(1f))
-                                Text(
-                                    "${items.size}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                        }
-                        items(items.size, key = { items[it].id }) { index ->
-                            val item = items[index]
-                            ItemRow(
-                                item = item,
-                                store = store,
-                                selectMode = selectMode,
-                                selected = item.id in selected,
-                                showSpace = filter.space == Spaces.ALL,
-                                onClick = {
-                                    if (selectMode) {
-                                        selected =
-                                            if (item.id in selected) selected - item.id
-                                            else selected + item.id
-                                    } else onEdit(item.id)
-                                },
-                                onLongClick = {
-                                    if (!selectMode) {
-                                        selectMode = true
-                                        selected = setOf(item.id)
-                                    }
-                                },
-                                onSwipeDelete = { pendingDelete = item },
-                                onViewImages = {
-                                    viewer = item.images.map { it.path } to 0
-                                },
-                            )
-                        }
-                    }
-                }
+            // ---------------------------------------------- 底部浮动操作区
+            if (!selectMode) {
+                HomeFloatingBar(
+                    keyword = filter.keyword,
+                    onKeywordChange = { filter.keyword = it },
+                    onOcr = { onOcr(targetCategory, targetSpace) },
+                    onAdd = { onAdd(targetCategory, targetSpace) },
+                    modifier = Modifier.align(Alignment.BottomCenter),
+                )
             }
         }
     }
-
     pendingDelete?.let { item ->
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
@@ -929,14 +1057,44 @@ fun HomeScreen(
         )
     }
 
-    viewer?.let { (paths, index) ->
+    viewer?.let { state ->
         ImageViewerOverlay(
-            paths = paths,
-            initialIndex = index,
+            paths = state.paths,
+            initialIndex = state.index,
+            origin = state.origin,
             onDismiss = { viewer = null },
         )
     }
 }
+
+/**
+ * 首页统一的「磨砂浮起」底：半透明面板色 + 柔投影 + 一圈亮边。
+ *
+ * 为什么不直接用 `Surface(color = 半透明, shadowElevation = x)`：
+ * M3 的 Surface 会把容器色当作阴影底板一起画，颜色带 alpha 时这块底板就从圆角外
+ * 透出一片**白色矩形**（统计卡、分类行、底部控件都中过招）。这里改成
+ * `Modifier.shadow` 显式给一组中性阴影色，再单独叠背景层和亮边，绕开这个问题。
+ *
+ * 末尾的 [Modifier.clip] 让水波纹和子内容都收在圆角里，阴影因为 `clip = false` 不被切掉。
+ */
+@Composable
+private fun Modifier.frostedPanel(
+    shape: Shape = RoundedCornerShape(18.dp),
+    elevation: Dp = 12.dp,
+    fill: Color = MaterialTheme.colorScheme.surface,
+    borderColor: Color = Color.White.copy(alpha = 0.55f),
+    borderWidth: Dp = 0.8.dp,
+): Modifier = this
+    .shadow(
+        elevation = elevation,
+        shape = shape,
+        clip = false,
+        ambientColor = Color(0x14000000),
+        spotColor = Color(0x33000000),
+    )
+    .background(fill.copy(alpha = 0.90f), shape)
+    .border(borderWidth, borderColor, shape)
+    .clip(shape)
 
 private fun countOf(
     grouped: List<Pair<ExpiryStatus, List<ExpiryItem>>>,
@@ -944,91 +1102,147 @@ private fun countOf(
 ): Int = grouped.firstOrNull { it.first == status }?.second?.size ?: 0
 
 /**
- * 底部常驻操作条：搜索 + 识别 + 新增排在同一行。
+ * 底部浮动操作区：搜索胶囊 + 独立拍照圆钮 + 绿色新增圆钮。
  *
- * 搜索框直接复用 [InputBox]（48dp 高、10dp 圆角、bodyMedium 字号），与编辑页的物品名称输入框
- * 完全同一套尺寸；右侧带一键清空。键盘弹出时整条被顶到键盘上方，边输边看列表结果。
+ * 三者各自成块浮在内容之上（不共用一条底板），高度统一 56dp、间距统一 10dp，
+ * 固定吸底不随列表滚动；搜索占满左侧剩余宽度，拍照夹在中间。
+ * 整条背后压一层「透明 → 背景色」的渐隐，列表滚到底时自然化开，不会撞到按钮上。
+ * 键盘弹出时被顶到键盘上方，边输边看结果。
  */
 @Composable
-private fun HomeBottomBar(
+private fun HomeFloatingBar(
     keyword: String,
     onKeywordChange: (String) -> Unit,
     onOcr: () -> Unit,
     onAdd: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    Surface(color = MaterialTheme.colorScheme.background) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .imePadding(),
+    Box(
+        modifier
+            .fillMaxWidth()
+            // 底板彻底透明：只有三个控件本身浮在内容上，列表内容从它们之间和下面穿过
+            .navigationBarsPadding()
+            .imePadding()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+    ) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            // 一条极淡的分隔线：列表滚到尽头时内容不会和搜索栏糊在一起
+            // 搜索胶囊：半透明磨砂白 + 亮边 + 柔和投影，没有底板也不会糊在内容里
             Box(
                 Modifier
-                    .fillMaxWidth()
-                    .height(1.dp)
-                    .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)),
-            )
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
+                    .weight(1f)
+                    .height(56.dp)
+                    .frostedPanel(RoundedCornerShape(28.dp)),
             ) {
-                InputBox(
-                    value = keyword,
-                    onValueChange = onKeywordChange,
-                    placeholder = "搜索名称或备注",
-                    fixedHeight = 48.dp,
-                    showClear = true,
-                    leading = {
-                        Icon(
-                            Icons.Filled.Search, contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp),
-                        )
-                    },
-                    modifier = Modifier.weight(1f),
-                )
-                // 识别：白底描边的次要入口，与搜索框同高同圆
-                Surface(
-                    onClick = onOcr,
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.surface,
-                    border = androidx.compose.foundation.BorderStroke(
-                        1.dp, MaterialTheme.colorScheme.outline,
-                    ),
-                    modifier = Modifier
-                        .size(48.dp)
-                        .semantics { contentDescription = "图像识别" },
+                Row(
+                    Modifier
+                        .fillMaxSize()
+                        .padding(start = 18.dp, end = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        CameraGlyph(
-                            color = MaterialTheme.colorScheme.primary,
-                            holeColor = MaterialTheme.colorScheme.surface,
-                            modifier = Modifier.size(22.dp),
+                    Icon(
+                        Icons.Filled.Search,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(19.dp),
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                        if (keyword.isEmpty()) {
+                            Text(
+                                "搜索名称或备注",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                            )
+                        }
+                        BasicTextField(
+                            value = keyword,
+                            onValueChange = onKeywordChange,
+                            singleLine = true,
+                            textStyle = LocalTextStyle.current.copy(
+                                color = MaterialTheme.colorScheme.onSurface,
+                                fontSize = 15.sp,
+                            ),
+                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                            modifier = Modifier.fillMaxWidth(),
                         )
                     }
-                }
-                // 新增：主入口，沿用原来的黄色圆钮
-                Surface(
-                    onClick = onAdd,
-                    shape = CircleShape,
-                    color = Color(0xFFFFC107),
-                    modifier = Modifier.size(48.dp),
-                ) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Icon(
-                            Icons.Filled.Add, contentDescription = "新增",
-                            tint = Color(0xFF303133), modifier = Modifier.size(24.dp),
-                        )
+                    if (keyword.isNotEmpty()) {
+                        IconButton(
+                            onClick = { onKeywordChange("") },
+                            modifier = Modifier.size(32.dp),
+                        ) {
+                            Icon(
+                                Icons.Filled.Close,
+                                contentDescription = "清空搜索",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        }
                     }
                 }
             }
+            // 拍照：从搜索框里独立出来的浮动圆钮，夹在搜索和新增中间
+            FloatCircleButton(
+                size = 56.dp,
+                fill = MaterialTheme.colorScheme.surface,
+                elevation = 12.dp,
+                description = "拍照识别",
+                onClick = onOcr,
+            ) {
+                CameraGlyph(
+                    color = MaterialTheme.colorScheme.primary,
+                    holeColor = MaterialTheme.colorScheme.surface,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
+            // 新增：与搜索框同一套磨砂浮起效果，+ 号用主色保持主操作辨识度
+            FloatCircleButton(
+                size = 56.dp,
+                fill = MaterialTheme.colorScheme.surface,
+                elevation = 12.dp,
+                description = "新增",
+                onClick = onAdd,
+            ) {
+                Icon(
+                    Icons.Filled.Add,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(28.dp),
+                )
+            }
         }
     }
+}
+
+/** 浮动圆钮：磨砂底 + 阴影 + 圆形裁切，尺寸、阴影、亮边由调用方定。 */
+@Composable
+private fun FloatCircleButton(
+    size: Dp,
+    fill: Color,
+    elevation: Dp,
+    description: String,
+    onClick: () -> Unit,
+    borderColor: Color = Color.White.copy(alpha = 0.55f),
+    content: @Composable () -> Unit,
+) {
+    Box(
+        Modifier
+            .size(size)
+            .semantics { contentDescription = description }
+            .frostedPanel(
+                shape = CircleShape,
+                elevation = elevation,
+                fill = fill,
+                borderColor = borderColor,
+            )
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) { content() }
 }
 
 /**
@@ -1106,15 +1320,8 @@ private fun StatCard(
     dense: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
-    Card(
-        modifier = modifier,
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-        border = androidx.compose.foundation.BorderStroke(
-            1.dp, MaterialTheme.colorScheme.outline,
-        ),
-    ) {
+    // 与搜索框、分类行同一套磨砂浮起效果：半透明白底 + 白色亮边 + 柔投影
+    Box(modifier.frostedPanel()) {
         Column(
             Modifier.padding(
                 horizontal = if (dense) 8.dp else 14.dp,
@@ -1152,10 +1359,15 @@ private fun ItemRow(
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onSwipeDelete: () -> Unit,
-    onViewImages: () -> Unit,
+    /** 点击缩略图看大图，带回缩略图的屏幕位置供查看器做展开/缩回转场。 */
+    onViewImages: (ImageOrigin?) -> Unit,
 ) {
     val days = Dates.daysUntil(item.expireAt)
     val status = store.statusOf(item)
+    // 缩略图在屏幕上的位置：布局后记录，点击看大图时交给查看器作为动画起点/终点。
+    // 圆角必须与缩略图一致（8dp），否则缩回终点形状不符会闪一下。
+    val thumbRadiusPx = with(LocalDensity.current) { 8.dp.toPx() }
+    var thumbOrigin by remember { mutableStateOf<ImageOrigin?>(null) }
     val dismissState = rememberSwipeToDismissBoxState(
         confirmValueChange = { value ->
             if (value == SwipeToDismissBoxValue.EndToStart && !selectMode) {
@@ -1176,7 +1388,7 @@ private fun ItemRow(
             // 多选态不画删除底色：卡片选中色是半透明的，红底会透上来变成一片红
             if (!selectMode) {
                 Box(
-                    Modifier.fillMaxSize().background(MaterialTheme.colorScheme.error, RoundedCornerShape(12.dp)),
+                    Modifier.fillMaxSize().background(MaterialTheme.colorScheme.error, RoundedCornerShape(24.dp)),
                     contentAlignment = Alignment.CenterEnd,
                 ) {
                     Icon(
@@ -1188,7 +1400,7 @@ private fun ItemRow(
         },
     ) {
         Card(
-            shape = RoundedCornerShape(12.dp),
+            shape = RoundedCornerShape(24.dp),
             modifier = Modifier
                 .fillMaxWidth()
                 .combinedClickable(onClick = onClick, onLongClick = onLongClick),
@@ -1198,28 +1410,25 @@ private fun ItemRow(
                     androidx.compose.ui.graphics.lerp(
                         MaterialTheme.colorScheme.surface,
                         MaterialTheme.colorScheme.primary,
-                        0.14f,
+                        0.10f,
                     )
                 } else {
                     MaterialTheme.colorScheme.surface
                 },
             ),
-            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-            border = if (selected) null else androidx.compose.foundation.BorderStroke(
-                1.dp, MaterialTheme.colorScheme.outline,
-            ),
+            // 参考通知中心：干净的大圆角白卡，去掉四周描边与彩色角落
+            elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
         ) {
             Row(
                 Modifier.height(IntrinsicSize.Min),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                // 分类色条：圆角短条，上下留白、左缘不贴边（与预览稿一致）
+                // 分类色条：固定 34dp 的短条，垂直居中；不再跟着行高拉长
                 Box(
                     Modifier
-                        .fillMaxHeight()
                         .padding(start = 8.dp)
                         .width(4.dp)
-                        .padding(vertical = 12.dp)
+                        .height(34.dp)
                         .background(
                             hexColor(store.categoryColorOf(item.category)),
                             RoundedCornerShape(2.dp),
@@ -1367,7 +1576,17 @@ private fun ItemRow(
                                     Spacer(Modifier.width(4.dp))
                                     // 缩略图：点击直接看大图（多张时在查看器里翻页）
                                     Surface(
-                                        onClick = onViewImages,
+                                        onClick = { onViewImages(thumbOrigin) },
+                                        modifier = Modifier.onGloballyPositioned { coords ->
+                                            val pos = coords.positionInWindow()
+                                            thumbOrigin = ImageOrigin(
+                                                x = pos.x,
+                                                y = pos.y,
+                                                width = coords.size.width.toFloat(),
+                                                height = coords.size.height.toFloat(),
+                                                cornerRadius = thumbRadiusPx,
+                                            )
+                                        },
                                         shape = RoundedCornerShape(8.dp),
                                         border = androidx.compose.foundation.BorderStroke(
                                             1.dp, MaterialTheme.colorScheme.outline,

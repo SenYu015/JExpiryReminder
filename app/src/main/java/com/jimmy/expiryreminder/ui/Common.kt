@@ -167,6 +167,7 @@ internal fun InputBox(
     showClear: Boolean = false,
     isError: Boolean = false,
     keyboardType: KeyboardType = KeyboardType.Text,
+    trailing: (@Composable () -> Unit)? = null,
 ) {
     InputBoxShell(
         isEmpty = value.isEmpty(),
@@ -177,6 +178,7 @@ internal fun InputBox(
         leading = leading,
         showClear = showClear,
         isError = isError,
+        trailing = trailing,
     ) { textModifier ->
         BasicTextField(
             value = value,
@@ -210,6 +212,7 @@ internal fun InputBox(
     showClear: Boolean = false,
     isError: Boolean = false,
     keyboardType: KeyboardType = KeyboardType.Text,
+    trailing: (@Composable () -> Unit)? = null,
 ) {
     InputBoxShell(
         isEmpty = value.text.isEmpty(),
@@ -220,6 +223,7 @@ internal fun InputBox(
         leading = leading,
         showClear = showClear,
         isError = isError,
+        trailing = trailing,
     ) { textModifier ->
         BasicTextField(
             value = value,
@@ -255,16 +259,18 @@ private fun InputBoxShell(
     leading: (@Composable () -> Unit)? = null,
     showClear: Boolean = false,
     isError: Boolean = false,
+    trailing: (@Composable () -> Unit)? = null,
     field: @Composable (Modifier) -> Unit,
 ) {
     val singleLine = fixedHeight != null
     val withClear = showClear && !isEmpty
     Surface(
-        shape = RoundedCornerShape(10.dp),
+        shape = RoundedCornerShape(14.dp),
         color = MaterialTheme.colorScheme.surface,
         border = BorderStroke(
             1.dp,
-            if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outline,
+            if (isError) MaterialTheme.colorScheme.error
+            else MaterialTheme.colorScheme.outlineVariant,
         ),
         modifier = modifier,
     ) {
@@ -275,7 +281,7 @@ private fun InputBoxShell(
                 .padding(
                     start = if (leading != null) 10.dp else 12.dp,
                     // 有清空按钮时右侧留白交给按钮自己，避免 X 贴边
-                    end = if (withClear) 4.dp else 12.dp,
+                    end = if (withClear || trailing != null) 4.dp else 12.dp,
                 )
                 .then(if (singleLine) Modifier else Modifier.padding(vertical = 12.dp)),
             verticalAlignment = if (singleLine) Alignment.CenterVertically else Alignment.Top,
@@ -301,6 +307,10 @@ private fun InputBoxShell(
             }
             if (withClear) {
                 ClearFieldButton(onClick = onClear)
+            }
+            trailing?.let {
+                if (!withClear) Spacer(Modifier.width(4.dp))
+                it()
             }
         }
     }
