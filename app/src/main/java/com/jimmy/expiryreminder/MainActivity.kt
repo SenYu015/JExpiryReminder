@@ -59,9 +59,18 @@ class MainActivity : ComponentActivity() {
     val appScope get() = (application as App).appScope
 
     companion object {
+        /** 桌面小组件列表项点击时带入的物品 id。 */
+        const val EXTRA_OPEN_ITEM_ID = "widget_item_id"
+
+        /** 桌面小组件右上角「+」：直接打开新增页。 */
+        const val EXTRA_OPEN_ADD = "widget_open_add"
+
+        /** 桌面小组件「+」左侧相机键：直接打开与主页相机按钮相同的选图（拍照）页。 */
+        const val EXTRA_OPEN_CAMERA = "widget_open_camera"
+
         /**
          * 长按桌面图标的快捷方式带入的标识（见 res/xml/shortcuts.xml）。
-         * 快捷方式 XML 的 extra 只能是字符串，所以这里统一用 getStringExtra 读取。
+         * 快捷方式 XML 的 extra 只能是字符串，所以不能复用上面的 Boolean extra。
          */
         const val EXTRA_SHORTCUT = "shortcut"
 
@@ -89,6 +98,12 @@ class MainActivity : ComponentActivity() {
     /** 把启动 Intent 翻译成目标页面；普通点图标启动返回 null（停在主页）。 */
     private fun resolveScreen(intent: Intent?): Screen? {
         if (intent == null) return null
+        // 桌面小组件：指定物品 / 新增 / 拍照
+        intent.getStringExtra(EXTRA_OPEN_ITEM_ID)?.takeIf { it.isNotEmpty() }
+            ?.let { return Screen.Edit(itemId = it) }
+        if (intent.getBooleanExtra(EXTRA_OPEN_ADD, false)) return Screen.Edit(itemId = null)
+        if (intent.getBooleanExtra(EXTRA_OPEN_CAMERA, false)) return Screen.PickImages()
+        // 长按桌面图标的快捷方式
         return when (intent.getStringExtra(EXTRA_SHORTCUT)) {
             SHORTCUT_ADD -> Screen.Edit(itemId = null)
             SHORTCUT_CAMERA -> Screen.PickImages()
