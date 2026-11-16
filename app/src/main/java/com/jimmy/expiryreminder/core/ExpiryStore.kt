@@ -762,21 +762,26 @@ class ExpiryStore private constructor() {
     }
 
     /**
-     * 删除空间：空间下还有物品（含已归档）时拒绝，返回 false。
-     * 物品不会因为删空间被连带删除——必须先转移或删除，避免误伤数据。
+     * 删除空间：空间本身移除，空间下的物品一律不删——只把它们的 spaceId 清空，
+     * 变成「未分配」（含已归档物品，避免盘里留下指向已删空间的死 id）。
+     * 返回被改成「未分配」的物品数；空间不存在时返回 null。
      */
-    suspend fun removeSpace(context: Context, id: String): Boolean {
-        var ok = false
-        mutex.withLock {
-            if (_state.value.items.any { it.spaceId == id }) return false
-            val list = _state.value.spaces.filter { it.id != id }
-            ok = list.size != _state.value.spaces.size
-            if (ok) {
-                _state.value = _state.value.copy(spaces = list)
-                persistLocked(context)
+    suspend fun removeSpace(context: Context, id: String): Int? = mutex.withLock {
+        val current = _state.value
+        val list = current.spaces.filter { it.id != id }
+        if (list.size == current.spaces.size) return@withLock null
+        var moved = 0
+        val items = current.items.map { item ->
+            if (item.spaceId == id) {
+                moved++
+                item.copy(spaceId = "")
+            } else {
+                item
             }
         }
-        return ok
+        _state.value = current.copy(spaces = list, items = items)
+        persistLocked(context)
+        moved
     }
 
     // ------------------------------------------------------------- reminders
