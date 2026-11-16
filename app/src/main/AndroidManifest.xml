@@ -91,6 +91,49 @@
             </intent-filter>
         </receiver>
 
+        <!-- 桌面小组件：标准 AppWidgetProvider，ColorOS 万能卡片/原子组件按此协议发现。
+             三个尺寸分别注册，卡片库里可单独添加；列表数据只读本机 data.json。 -->
+        <receiver
+            android:name=".widget.ExpiryWidgetSmall"
+            android:exported="true"
+            android:label="@string/widget_small_desc">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/expiry_widget_small" />
+        </receiver>
+
+        <receiver
+            android:name=".widget.ExpiryWidgetMedium"
+            android:exported="true"
+            android:label="@string/widget_medium_desc">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/expiry_widget_medium" />
+        </receiver>
+
+        <receiver
+            android:name=".widget.ExpiryWidgetLarge"
+            android:exported="true"
+            android:label="@string/widget_large_desc">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/expiry_widget_large" />
+        </receiver>
+
+        <service
+            android:name=".widget.ExpiryWidgetService"
+            android:exported="false"
+            android:permission="android.permission.BIND_REMOTEVIEWS" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

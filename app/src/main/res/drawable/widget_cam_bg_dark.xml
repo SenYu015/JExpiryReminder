@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 深色主题下的相机键底色：主色低亮度圆底，避免在深色卡片上刺眼 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">
+    <solid android:color="#33291B" />
+</shape>
