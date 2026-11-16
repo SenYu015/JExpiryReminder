@@ -69,22 +69,19 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.jimmy.expiryreminder.BuildConfig
-import com.jimmy.expiryreminder.core.AutoSyncEngine
 import com.jimmy.expiryreminder.core.Backup
-import com.jimmy.expiryreminder.core.ConflictStore
 import com.jimmy.expiryreminder.core.ExpiryStore
 import com.jimmy.expiryreminder.core.SettingsStore
 import com.jimmy.expiryreminder.core.StatCard
 import com.jimmy.expiryreminder.notify.ReminderService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.time.format.DateTimeFormatter
 
 /** 设置页：主题、通知、备份导出导入、跨设备传输、清空数据。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -> Unit) {
+fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit) {
     val context = LocalContext.current
     val activity = context as? Activity
     val store = ExpiryStore.get()
@@ -94,9 +91,6 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
     val notifyTime by settings.notifyTime.collectAsStateWithLifecycle()
     val useAlarmClock by settings.useAlarmClock.collectAsStateWithLifecycle()
     val statCards by settings.statCards.collectAsStateWithLifecycle()
-    val autoSyncEnabled by settings.autoSyncEnabled.collectAsStateWithLifecycle()
-    val autoSyncOnBoot by settings.autoSyncOnBoot.collectAsStateWithLifecycle()
-    val pendingConflicts by ConflictStore.conflicts.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
@@ -400,81 +394,6 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
                 supportingContent = { Text("同一 Wi-Fi 下与另一台设备配对，双向传输物品记录") },
                 trailingContent = {
                     OutlinedButton(onClick = onTransfer) { Text("打开") }
-                },
-            )
-
-            HorizontalDivider()
-            SectionTitle("自动同步")
-
-            ListItem(
-                headlineContent = { HelpTitle(SettingsHelp.AutoSync) { helpEntry = it } },
-                supportingContent = {
-                    Text(
-                        if (autoSyncEnabled) "已开启：同一 Wi-Fi 下自动发现设备并交换数据"
-                        else "已关闭：数据仅保存在本机",
-                    )
-                },
-                trailingContent = {
-                    AppSwitch(
-                        checked = autoSyncEnabled,
-                        onCheckedChange = { enabled ->
-                            settings.update(context, autoSyncEnabled = enabled)
-                            scope.launch {
-                                snackbar.showSnackbar(
-                                    if (enabled) "自动同步已开启" else "自动同步已关闭",
-                                )
-                            }
-                        },
-                    )
-                },
-            )
-
-            ListItem(
-                headlineContent = { HelpTitle(SettingsHelp.AutoSyncOnBoot) { helpEntry = it } },
-                supportingContent = { Text("开机后恢复 30 分钟一次的局域网同步排程") },
-                trailingContent = {
-                    AppSwitch(
-                        checked = autoSyncOnBoot,
-                        onCheckedChange = { enabled ->
-                            settings.update(context, autoSyncOnBoot = enabled)
-                            AutoSyncEngine.scheduleIfEnabled(context)
-                            scope.launch {
-                                snackbar.showSnackbar(
-                                    if (enabled) "开机同步已开启" else "开机同步已关闭",
-                                )
-                            }
-                        },
-                    )
-                },
-            )
-
-            ListItem(
-                headlineContent = { HelpTitle(SettingsHelp.SyncNow) { helpEntry = it } },
-                supportingContent = { Text("马上与已发现的设备交换一次数据") },
-                trailingContent = {
-                    OutlinedButton(onClick = {
-                        scope.launch {
-                            val result = withContext(Dispatchers.IO) {
-                                runCatching { AutoSyncEngine.syncNow(context) }
-                                    .getOrElse { "同步失败：${it.message}" }
-                            }
-                            snackbar.showSnackbar(result)
-                        }
-                    }) { Text("同步") }
-                },
-            )
-
-            ListItem(
-                headlineContent = { HelpTitle(SettingsHelp.Conflicts) { helpEntry = it } },
-                supportingContent = {
-                    Text(
-                        if (pendingConflicts.isEmpty()) "暂无需要人工确认的物品"
-                        else "${pendingConflicts.size} 件疑似重复物品等待处理",
-                    )
-                },
-                modifier = Modifier.clickable { onConflicts() },
-                trailingContent = {
-                    TextButton(onClick = onConflicts) { Text("查看") }
                 },
             )
 

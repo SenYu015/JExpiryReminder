@@ -82,15 +82,6 @@
             </intent-filter>
         </receiver>
 
-        <!-- 自动同步的定时兜底；设置里关闭同步时会把这个闹钟取消 -->
-        <receiver
-            android:name=".notify.AutoSyncReceiver"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="com.jimmy.expiryreminder.action.AUTO_SYNC" />
-            </intent-filter>
-        </receiver>
-
         <!-- 桌面小组件：标准 AppWidgetProvider，ColorOS 万能卡片/原子组件按此协议发现。
              三个尺寸分别注册，卡片库里可单独添加；列表数据只读本机 data.json。 -->
         <receiver

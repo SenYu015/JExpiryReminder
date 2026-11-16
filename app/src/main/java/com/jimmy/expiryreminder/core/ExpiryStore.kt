@@ -52,7 +52,6 @@ class ExpiryStore private constructor() {
     /** 上一次落盘时每条记录的内容指纹（不含 rev）：用于在统一入口识别「真的改过」。 */
     private val lastHashes = HashMap<String, Int>()
 
-    /** 内容指纹刻意排除 rev，避免「只改标记」被当成一次新修改。 */
     /** 内容指纹用于判断「本机有没有改过」；排除同步元字段，避免补发 syncId 造成 rev 震荡。 */
     private fun contentHash(item: ExpiryItem): Int =
         item.copy(rev = 0L, syncId = "").toJson().toString().hashCode()
@@ -372,9 +371,9 @@ class ExpiryStore private constructor() {
 
             // v3 图片迁移改动了数据才落盘（既有逻辑，仅转换存储形式，不删数据）
             if (migrated) persistLocked(context)
-            // 旧版本 data.json 没有 syncId：立刻按 id 派生补发，避免首次同步仍以空 ID 参与匹配
+            // 旧版本 data.json 没有 syncId：立刻按 id 派生补发（首次落盘时自然写入）
             else if (migratedItems.any { it.syncId.isBlank() }) {
-                persistLocked(context, syncApply = true)
+                persistLocked(context)
             }
         }
     }
@@ -385,11 +384,9 @@ class ExpiryStore private constructor() {
 
     /**
      * 统一落盘入口，也是修改标记的唯一分配点：
-     * - 本机写操作（新增/编辑/导入/批量改…）→ 内容确实变了的记录 rev = ++时钟；
-     * - [syncApply] = true（自动同步落地）→ 沿用对方 rev，只把本机时钟抬到 max，
-     *   否则两台设备会互相把对方记录当成「本机新修改」而无限回传。
+     * 本机写操作（新增/编辑/导入/批量改…）→ 内容确实变了的记录 rev = ++时钟。
      */
-    private suspend fun persistLocked(context: Context, syncApply: Boolean = false) {
+    private suspend fun persistLocked(context: Context) {
         val current = _state.value
         var clock = current.revision
         val hashes = HashMap<String, Int>(current.items.size)
@@ -399,21 +396,10 @@ class ExpiryStore private constructor() {
             val hash = contentHash(item)
             hashes[item.id] = hash
             val changed = lastHashes[item.id] != hash
-            when {
-                syncApply && item.rev > 0L -> {
-                    if (item.rev > clock) clock = item.rev
-                    item
-                }
-                syncApply -> {
-                    clock += 1
-                    item.copy(rev = clock)
-                }
-                changed || item.rev <= 0L -> {
-                    clock += 1
-                    item.copy(rev = clock)
-                }
-                else -> item
-            }
+            if (changed || item.rev <= 0L) {
+                clock += 1
+                item.copy(rev = clock)
+            } else item
         }
         lastHashes.clear()
         lastHashes.putAll(hashes)
@@ -442,97 +428,6 @@ class ExpiryStore private constructor() {
         mutex.withLock { _state.value = State() }
         load(context)
     }
-
-    /**
-     * 自动同步批量落地：按 id 覆盖 + 追加新物品，全过程只写一次盘。
-     *
-     * 与 [updateItem] 不同，这里**不刷新 updatedAt**：否则两台设备收到对方的
-     * 回传快照时都会认为「对方更新」，形成无限来回同步。
-     */
-    suspend fun applyAutoSyncItems(
-        context: Context,
-        adds: List<ExpiryItem>,
-        updates: List<ExpiryItem>,
-    ) {
-        if (adds.isEmpty() && updates.isEmpty()) return
-        mutex.withLock {
-            val list = _state.value.items.toMutableList()
-            for (patch in updates) {
-                val index = list.indexOfFirst { it.id == patch.id }
-                if (index >= 0) {
-                    val current = list[index]
-                    list[index] = patch.copy(
-                        id = current.id,
-                        createdAt = current.createdAt,
-                        images = current.images,
-                    )
-                }
-            }
-            val ids = list.mapTo(HashSet()) { it.id }
-            for (item in adds) {
-                if (ids.add(item.id)) list += item
-            }
-            _state.value = _state.value.copy(items = list)
-            persistLocked(context, syncApply = true)
-        }
-    }
-
-    /**
-     * 本机记录较新时抬升 rev，让它进入下一轮增量回传；
-     * **不改 updatedAt**（业务修改时间保持不变），避免两端互相误判为「刚编辑过」。
-     */
-    suspend fun bumpRevForSync(context: Context, ids: Collection<String>) {
-        if (ids.isEmpty()) return
-        mutex.withLock {
-            val targets = ids.toHashSet()
-            val list = _state.value.items.toMutableList()
-            var clock = _state.value.revision
-            var changed = false
-            for (i in list.indices) {
-                if (list[i].id in targets) {
-                    clock += 1
-                    list[i] = list[i].copy(rev = clock)
-                    changed = true
-                }
-            }
-            if (!changed) return
-            _state.value = _state.value.copy(items = list)
-            persistLocked(context, syncApply = true)
-        }
-    }
-
-    /**
-     * 同步补图：只给「本地还没有图片」的物品挂上远端引用，不刷新修改标记，
-     * 否则补图会被当成一次本机修改再回传，来回震荡。
-     */
-    suspend fun attachImages(context: Context, itemId: String, images: List<ExpiryImage>) {
-        if (images.isEmpty()) return
-        mutex.withLock {
-            val list = _state.value.items.toMutableList()
-            val index = list.indexOfFirst { it.id == itemId }
-            if (index < 0) return
-            val current = list[index]
-            if (current.images.isNotEmpty()) return
-            list[index] = current.copy(images = images.take(MAX_IMAGES))
-            _state.value = _state.value.copy(items = list)
-            persistLocked(context, syncApply = true)
-        }
-    }
-
-    /** 把本机时钟抬到对方水位：之后本机任何编辑产生的 rev 都会大于对方已见过的记录。 */
-    suspend fun observeRemoteClock(context: Context, remoteMaxRev: Long) {
-        if (remoteMaxRev <= _state.value.revision) return
-        mutex.withLock {
-            if (remoteMaxRev > _state.value.revision) {
-                _state.value = _state.value.copy(revision = remoteMaxRev)
-                persistLocked(context, syncApply = true)
-            }
-        }
-    }
-
-    /** 增量同步：只取出对方「上次确认水位」之后发生变更的记录。 */
-    fun itemsSince(sinceRev: Long): List<ExpiryItem> =
-        _state.value.items.filter { it.rev > sinceRev }
 
     // ---------------------------------------------------------------- items
 
@@ -700,35 +595,6 @@ class ExpiryStore private constructor() {
             persistLocked(context)
         }
         return additions.size
-    }
-
-    /**
-     * 自动同步的分类/空间落地：只补本机没有的项；颜色、改名覆盖与顺序按 [plan] 的
-     * 合并结果写回（plan 内已保证本机优先、远端只补缺）。
-     */
-    suspend fun applyMetaSync(context: Context, plan: MetaPlan) {
-        mutex.withLock {
-            val cur = _state.value
-            val cats = cur.categories + plan.addCategories.filter { add ->
-                !Categories.BUILTIN.any { it.id == add.id } &&
-                    cur.categories.none { it.id == add.id }
-            }
-            val spaces = cur.spaces + plan.addSpaces.filter { add ->
-                cur.spaces.none { it.id == add.id }
-            }
-            val next = cur.copy(
-                categories = cats,
-                spaces = spaces,
-                categoryColors = plan.categoryColors,
-                categoryLabels = plan.categoryLabels,
-                order = plan.categoryOrder,
-                spaceColors = plan.spaceColors,
-            )
-            if (next != cur) {
-                _state.value = next
-                persistLocked(context)
-            }
-        }
     }
 
     // ------------------------------------------------------------ categories

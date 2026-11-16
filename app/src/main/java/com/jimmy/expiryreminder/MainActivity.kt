@@ -28,7 +28,6 @@ import com.jimmy.expiryreminder.core.SettingsStore
 import com.jimmy.expiryreminder.notify.ReminderService
 import com.jimmy.expiryreminder.ui.AppTheme
 import com.jimmy.expiryreminder.ui.CategoryScreen
-import com.jimmy.expiryreminder.ui.ConflictsScreen
 import com.jimmy.expiryreminder.ui.EditScreen
 import com.jimmy.expiryreminder.ui.HomeFilterState
 import com.jimmy.expiryreminder.ui.HomeScreen
@@ -180,7 +179,6 @@ class MainActivity : ComponentActivity() {
                     fun goBack() {
                         screen = when (val s = screen) {
                             is Screen.Transfer -> s.origin.toScreen()
-                            is Screen.Conflicts -> s.origin.toScreen()
                             else -> Screen.Home
                         }
                     }
@@ -256,12 +254,8 @@ class MainActivity : ComponentActivity() {
                             SettingsScreen(
                                 onBack = { screen = Screen.Home },
                                 onTransfer = { screen = Screen.Transfer(origin = Origin.Settings) },
-                                onConflicts = { screen = Screen.Conflicts(origin = Origin.Settings) },
                             )
                         }
-                        is Screen.Conflicts -> ConflictsScreen(
-                            onBack = { goBack() },
-                        )
                         is Screen.Categories -> CategoryScreen(
                             onBack = { screen = Screen.Home },
                         )
@@ -293,9 +287,6 @@ sealed interface Screen {
     ) : Screen
     data object Settings : Screen
 
-    /** 自动同步发现的疑似重复物品，逐条人工合并。 */
-    data class Conflicts(val origin: Origin = Origin.Home) : Screen
-
     /** 分类管理（独立页面，不再是弹窗）。 */
     data object Categories : Screen
 
@@ -325,7 +316,7 @@ sealed interface Screen {
 
 /**
  * 二级页的来源。同页面可能从不同入口进入，返回时必须回到来处而不是固定回主页：
- * 主页「分享」→ 传输页回主页；设置 → 传输页 / 冲突合并页回设置。
+ * 主页「分享」→ 传输页回主页；设置 → 传输页回设置。
  */
 enum class Origin {
     Home,
@@ -357,10 +348,6 @@ private val ScreenSaver = mapSaver(
                 "space" to (screen.defaultSpace ?: ""),
             )
             is Screen.Settings -> mapOf("name" to "settings")
-            is Screen.Conflicts -> mapOf(
-                "name" to "conflicts",
-                "origin" to screen.origin.name,
-            )
             is Screen.Categories -> mapOf("name" to "categories")
             is Screen.Spaces -> mapOf("name" to "spaces")
             is Screen.Transfer -> mapOf(
@@ -386,7 +373,6 @@ private val ScreenSaver = mapSaver(
     restore = { map ->
         when (map["name"]) {
             "settings" -> Screen.Settings
-            "conflicts" -> Screen.Conflicts(origin = originFrom(map["origin"]))
             "categories" -> Screen.Categories
             "spaces" -> Screen.Spaces
             "transfer" -> Screen.Transfer(

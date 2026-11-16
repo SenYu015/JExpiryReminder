@@ -60,14 +60,6 @@ class SettingsStore private constructor() {
     private val _statCards = MutableStateFlow(StatCard.DEFAULT)
     val statCards: StateFlow<List<StatCard>> get() = _statCards
 
-    /** 同一 Wi-Fi 下自动发现设备并合并数据；默认关闭，老用户升级后不受影响。 */
-    private val _autoSyncEnabled = MutableStateFlow(false)
-    val autoSyncEnabled: StateFlow<Boolean> get() = _autoSyncEnabled
-
-    /** 开机后是否恢复自动同步排程。 */
-    private val _autoSyncOnBoot = MutableStateFlow(true)
-    val autoSyncOnBoot: StateFlow<Boolean> get() = _autoSyncOnBoot
-
     fun load(context: Context) {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val raw = prefs.getString(KEY_SETTINGS, null) ?: return
@@ -94,13 +86,6 @@ class SettingsStore private constructor() {
                 }
                 _statCards.value = StatCard.normalize(keys)
             }
-            // 自动同步默认关闭；旧版本没有这个键时保持默认，不写回
-            if (map.has("autoSyncEnabled") && !map.isNull("autoSyncEnabled")) {
-                _autoSyncEnabled.value = map.optBoolean("autoSyncEnabled", false)
-            }
-            if (map.has("autoSyncOnBoot") && !map.isNull("autoSyncOnBoot")) {
-                _autoSyncOnBoot.value = map.optBoolean("autoSyncOnBoot", true)
-            }
         } catch (_: Exception) {
             // 坏数据直接用默认值
         }
@@ -113,16 +98,12 @@ class SettingsStore private constructor() {
         notifyTime: String? = null,
         useAlarmClock: Boolean? = null,
         statCards: List<StatCard>? = null,
-        autoSyncEnabled: Boolean? = null,
-        autoSyncOnBoot: Boolean? = null,
     ) {
         if (themeMode != null) _themeMode.value = themeMode
         if (notifyEnabled != null) _notifyEnabled.value = notifyEnabled
         if (notifyTime != null && TIME_REGEX.matches(notifyTime)) _notifyTime.value = notifyTime
         if (useAlarmClock != null) _useAlarmClock.value = useAlarmClock
         if (statCards != null) _statCards.value = StatCard.normalize(statCards.map { it.key })
-        if (autoSyncEnabled != null) _autoSyncEnabled.value = autoSyncEnabled
-        if (autoSyncOnBoot != null) _autoSyncOnBoot.value = autoSyncOnBoot
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
             .putString(
@@ -134,8 +115,6 @@ class SettingsStore private constructor() {
                     .put("notifyTime", _notifyTime.value)
                     .put("useAlarmClock", _useAlarmClock.value)
                     .put("statCards", JSONArray(_statCards.value.map { it.key }))
-                    .put("autoSyncEnabled", _autoSyncEnabled.value)
-                    .put("autoSyncOnBoot", _autoSyncOnBoot.value)
                     .toString(),
             )
             .apply()
