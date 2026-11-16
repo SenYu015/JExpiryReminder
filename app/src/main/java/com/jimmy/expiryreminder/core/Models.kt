@@ -413,6 +413,11 @@ data class ExpiryData(
      * 自定义空间的颜色直接写在 [spaces] 里，不进这张表。
      */
     val spaceColors: Map<String, String> = emptyMap(),
+    /**
+     * 每种分类在「新增物品」时预填的提前提醒天数（键 = 分类 id）。
+     * 没有登记的键表示该分类无默认值，新增物品时不预选任何档位。
+     */
+    val categoryRemindDefaults: Map<String, List<Int>> = emptyMap(),
 ) {
     fun toJson(): JSONObject {
         val colors = JSONObject()
@@ -421,6 +426,8 @@ data class ExpiryData(
         for ((k, v) in categoryLabels) labels.put(k, v)
         val spaceColorJson = JSONObject()
         for ((k, v) in spaceColors) spaceColorJson.put(k, v)
+        val remindDefaults = JSONObject()
+        for ((k, v) in categoryRemindDefaults) remindDefaults.put(k, JSONArray(v))
         return JSONObject()
             .put("version", version)
             .put("items", JSONArray(items.map { it.toJson() }))
@@ -430,11 +437,16 @@ data class ExpiryData(
             .put("categoryOrder", JSONArray(categoryOrder))
             .put("spaces", JSONArray(spaces.map { it.toJson() }))
             .put("spaceColors", spaceColorJson)
+            .put("categoryRemindDefaults", remindDefaults)
     }
 }
 
-/** data.json 当前版本：v4 图片改文件相对路径；v5 分类颜色可编辑；v6 物品归属空间；v7 空间颜色可编辑；v8 去掉内置默认空间（未维护的空间读取时视为未分配，不改写历史数据）。 */
-const val DATA_VERSION = 8
+/**
+ * data.json 当前版本：v4 图片改文件相对路径；v5 分类颜色可编辑；v6 物品归属空间；
+ * v7 空间颜色可编辑；v8 去掉内置默认空间（未维护的空间读取时视为未分配，不改写历史数据）；
+ * v9 分类可设默认提前提醒天数（缺该键即无默认，不做迁移、不改写历史数据）。
+ */
+const val DATA_VERSION = 9
 
 // ---------------------------------------------------------------- 状态
 

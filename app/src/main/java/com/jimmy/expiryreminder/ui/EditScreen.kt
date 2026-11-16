@@ -49,7 +49,6 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -191,7 +190,12 @@ fun EditScreen(
             }
         )
     }
-    var remindDays by remember { mutableStateOf(existing?.remindDays ?: emptyList()) }
+    // 新增物品时预填该分类的默认提前提醒天数；编辑已有物品永远用物品自己的设置
+    var remindDays by remember {
+        mutableStateOf(existing?.remindDays ?: store.defaultRemindDaysOf(category))
+    }
+    // 用户是否手动改过提醒档位：没改过时，新增页切换分类会跟着换成新分类的默认值
+    var remindTouched by remember { mutableStateOf(false) }
     var quantity by remember { mutableStateOf(existing?.quantity ?: 1) }
     var note by remember { mutableStateOf(existing?.note ?: "") }
     var images by remember { mutableStateOf(existing?.images ?: prefill?.images ?: emptyList()) }
@@ -572,6 +576,10 @@ fun EditScreen(
                                                     category = cat.id
                                                     categoryMenu = false
                                                     categoryFromOcr = false
+                                                    // 新增物品且用户还没手动挑过档位：跟随分类换成它的默认值
+                                                    if (existing == null && !remindTouched) {
+                                                        remindDays = store.defaultRemindDaysOf(cat.id)
+                                                    }
                                                 },
                                             )
                                         }
@@ -743,53 +751,15 @@ fun EditScreen(
 
                         // -------------------------------------- 提前提醒
                         FieldLabel("提前提醒")
-                        // 预设档位之外的用户自填天数：与预设一起按由远到近排，「当天」固定收尾
-                        val customRemindDays =
-                            remindDays.filter { it !in REMIND_DAY_OPTIONS }.sortedDescending()
-                        val remindChips =
-                            (REMIND_DAY_OPTIONS.filter { it > 0 } + customRemindDays)
-                                .sortedDescending() + REMIND_DAY_OPTIONS.filter { it == 0 }
-                        FlowRow(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalArrangement = Arrangement.spacedBy(2.dp),
-                        ) {
-                            for (day in remindChips) {
-                                val selectedDay = day in remindDays
-                                FilterChip(
-                                    selected = selectedDay,
-                                    onClick = {
-                                        remindDays =
-                                            if (day in remindDays) remindDays - day else remindDays + day
-                                    },
-                                    label = { Text(remindDayLabel(day)) },
-                                    modifier = Modifier.height(30.dp),
-                                    trailingIcon = if (selectedDay) {
-                                        {
-                                            Icon(
-                                                Icons.Filled.Close,
-                                                contentDescription = "移除",
-                                                modifier = Modifier.size(13.dp),
-                                            )
-                                        }
-                                    } else null,
-                                )
-                            }
-                            // 自定义入口：录入 1~365 天，确认后作为一枚档位加入
-                            FilterChip(
-                                selected = false,
-                                onClick = { customDayDialog = true },
-                                label = { Text("自定义") },
-                                modifier = Modifier.height(30.dp),
-                                leadingIcon = {
-                                    Icon(
-                                        Icons.Filled.Add,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(14.dp),
-                                    )
-                                },
-                            )
-                        }
+                        RemindDayChips(
+                            selected = remindDays,
+                            onToggle = { day ->
+                                remindTouched = true
+                                remindDays =
+                                    if (day in remindDays) remindDays - day else remindDays + day
+                            },
+                            onCustom = { customDayDialog = true },
+                        )
                         if (remindDays.isEmpty()) {
                             Text(
                                 "未选择则不推送到期提醒",
