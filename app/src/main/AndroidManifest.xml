@@ -82,6 +82,15 @@
             </intent-filter>
         </receiver>
 
+        <!-- 自动同步的定时兜底；设置里关闭同步时会把这个闹钟取消 -->
+        <receiver
+            android:name=".notify.AutoSyncReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.jimmy.expiryreminder.action.AUTO_SYNC" />
+            </intent-filter>
+        </receiver>
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

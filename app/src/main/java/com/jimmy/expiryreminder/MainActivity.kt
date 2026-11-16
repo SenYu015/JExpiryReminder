@@ -28,6 +28,7 @@ import com.jimmy.expiryreminder.core.SettingsStore
 import com.jimmy.expiryreminder.notify.ReminderService
 import com.jimmy.expiryreminder.ui.AppTheme
 import com.jimmy.expiryreminder.ui.CategoryScreen
+import com.jimmy.expiryreminder.ui.ConflictsScreen
 import com.jimmy.expiryreminder.ui.EditScreen
 import com.jimmy.expiryreminder.ui.HomeFilterState
 import com.jimmy.expiryreminder.ui.HomeScreen
@@ -234,6 +235,10 @@ class MainActivity : ComponentActivity() {
                         is Screen.Settings -> SettingsScreen(
                             onBack = { screen = Screen.Home },
                             onTransfer = { screen = Screen.Transfer(emptyList()) },
+                            onConflicts = { screen = Screen.Conflicts },
+                        )
+                        is Screen.Conflicts -> ConflictsScreen(
+                            onBack = { screen = Screen.Home },
                         )
                         is Screen.Categories -> CategoryScreen(
                             onBack = { screen = Screen.Home },
@@ -265,6 +270,9 @@ sealed interface Screen {
         val prefill: com.jimmy.expiryreminder.ocr.PrefillDraft? = null,
     ) : Screen
     data object Settings : Screen
+
+    /** 自动同步发现的疑似重复物品，逐条人工合并。 */
+    data object Conflicts : Screen
 
     /** 分类管理（独立页面，不再是弹窗）。 */
     data object Categories : Screen
@@ -304,6 +312,7 @@ private val ScreenSaver = mapSaver(
                 "space" to (screen.defaultSpace ?: ""),
             )
             is Screen.Settings -> mapOf("name" to "settings")
+            is Screen.Conflicts -> mapOf("name" to "conflicts")
             is Screen.Categories -> mapOf("name" to "categories")
             is Screen.Spaces -> mapOf("name" to "spaces")
             is Screen.Transfer -> mapOf(
@@ -328,6 +337,7 @@ private val ScreenSaver = mapSaver(
     restore = { map ->
         when (map["name"]) {
             "settings" -> Screen.Settings
+            "conflicts" -> Screen.Conflicts
             "categories" -> Screen.Categories
             "spaces" -> Screen.Spaces
             "transfer" -> Screen.Transfer(
