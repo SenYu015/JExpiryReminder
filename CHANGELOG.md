@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.0.0](https://github.com/nickynull/JExpiryReminder/compare/v1.14.0...v2.0.0) (2026-11-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* 完全移除局域网自动同步功能
+
+### Features
+
+* 完全移除局域网自动同步功能 ([21ac692](https://github.com/nickynull/JExpiryReminder/commit/21ac6920e5db8897f17f19e7d3a81fb776bd084f))
+
 ## [1.14.0](https://github.com/nickynull/JExpiryReminder/compare/v1.13.0...v1.14.0) (2026-11-16)
 
 
