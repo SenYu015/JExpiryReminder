@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.12.0](https://github.com/nickynull/JExpiryReminder/compare/v1.11.0...v1.12.0) (2026-11-16)
+
+
+### Features
+
+* **提醒:** 分类可配置新增时的默认提前提醒天数 ([c1cb1c3](https://github.com/nickynull/JExpiryReminder/commit/c1cb1c344d21194c2c060ad01168bccfa648cbf5))
+* **空间:** 删除空间不再要求空间为空，物品自动转为「未分配」 ([e90e3f3](https://github.com/nickynull/JExpiryReminder/commit/e90e3f323296089f203b444f8d2f53f4420e48b0))
+* **编辑:** 新增物品时提示同名/相似物品，可直接跳去编辑已有条目 ([50daed6](https://github.com/nickynull/JExpiryReminder/commit/50daed6c828d67a2779dcd74786e067ac800cbb6))
+
 ## [1.11.0](https://github.com/nickynull/JExpiryReminder/compare/v1.10.0...v1.11.0) (2026-11-15)
 
 
