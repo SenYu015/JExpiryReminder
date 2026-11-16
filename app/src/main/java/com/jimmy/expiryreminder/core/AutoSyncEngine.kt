@@ -174,7 +174,8 @@ object AutoSyncEngine {
                 tick(context)
             }
         }
-        scheduleAlarm(context)
+        // 兜底闹钟也要过「开机自动同步」这一关：关掉时不排，进程被杀后就不会再被拉起
+        scheduleIfEnabled(context)
     }
 
     @Synchronized

@@ -23,7 +23,8 @@ class AutoSyncReceiver : BroadcastReceiver() {
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             try {
                 AutoSyncEngine.syncNow(app)
-                AutoSyncEngine.scheduleAlarm(app)
+                // 续排同样走总闸：期间用户关掉「开机自动同步」时这里会改成取消，不再续排
+                AutoSyncEngine.scheduleIfEnabled(app)
             } finally {
                 pending.finish()
             }

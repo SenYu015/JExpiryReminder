@@ -37,6 +37,9 @@ fun JSONObject.optIntOrNull(key: String): Int? =
         when (v) {
             is Number -> v.toInt()
             is String -> v.toIntOrNull()
+            // 显式 null 分支：K2 2.4 对这种块尾位置的可空 subject when 会误报非穷尽，
+            // 语义上 else 已覆盖 null，这里只是满足新检查器
+            null -> null
             else -> null
         }
     } else null

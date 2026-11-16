@@ -43,7 +43,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -110,6 +109,8 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
     var pendingImport by remember { mutableStateOf<Uri?>(null) }
     var showClearConfirm by remember { mutableStateOf(false) }
     var showRomHelp by remember { mutableStateOf(false) }
+    // 标题旁「?」打开的详细说明，null 表示不显示
+    var helpEntry by remember { mutableStateOf<SettingHelp?>(null) }
 
     // 权限/排程状态每次回到前台都重新读一遍：用户去系统设置改完回来能立刻看到结果
     var reliabilityTick by remember { mutableStateOf(0) }
@@ -212,10 +213,10 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
             SectionTitle("通知")
 
             ListItem(
-                headlineContent = { Text("启用到期通知") },
+                headlineContent = { HelpTitle(SettingsHelp.Notify) { helpEntry = it } },
                 supportingContent = { Text("关闭后不再推送任何提醒") },
                 trailingContent = {
-                    Switch(
+                    AppSwitch(
                         checked = notifyEnabled,
                         onCheckedChange = { enabled ->
                             settings.update(context, notifyEnabled = enabled)
@@ -228,7 +229,7 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
             )
 
             ListItem(
-                headlineContent = { Text("推送时刻") },
+                headlineContent = { HelpTitle(SettingsHelp.NotifyTime) { helpEntry = it } },
                 supportingContent = { Text("每天 $notifyTime 推送到期提醒") },
                 trailingContent = {
                     OutlinedButton(onClick = {
@@ -244,12 +245,12 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
             SectionTitle("后台可靠性")
 
             ListItem(
-                headlineContent = { Text("闹钟式提醒") },
+                headlineContent = { HelpTitle(SettingsHelp.AlarmClock) { helpEntry = it } },
                 supportingContent = {
                     Text("状态栏显示闹钟图标；抗系统省电清理最稳。关闭后提醒可能延后几分钟到几小时")
                 },
                 trailingContent = {
-                    Switch(
+                    AppSwitch(
                         checked = useAlarmClock,
                         onCheckedChange = { enabled ->
                             settings.update(context, useAlarmClock = enabled)
@@ -262,7 +263,7 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
             )
 
             ListItem(
-                headlineContent = { Text("精确闹钟权限") },
+                headlineContent = { HelpTitle(SettingsHelp.ExactAlarm) { helpEntry = it } },
                 supportingContent = {
                     Text(
                         if (exactGranted) "已授予，提醒可以准点触发"
@@ -285,7 +286,7 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
             )
 
             ListItem(
-                headlineContent = { Text("忽略电池优化") },
+                headlineContent = { HelpTitle(SettingsHelp.Battery) { helpEntry = it } },
                 supportingContent = {
                     Text(
                         if (batteryIgnored) "已忽略，系统不会因省电清理掉提醒"
@@ -308,7 +309,7 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
             )
 
             ListItem(
-                headlineContent = { Text("自启动 / 后台运行") },
+                headlineContent = { HelpTitle(SettingsHelp.Autostart) { helpEntry = it } },
                 supportingContent = { Text("小米、华为、OPPO、vivo 等机型还需手动允许") },
                 trailingContent = {
                     TextButton(onClick = { showRomHelp = true }) { Text("查看") }
@@ -316,7 +317,7 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
             )
 
             ListItem(
-                headlineContent = { Text("已排程提醒") },
+                headlineContent = { HelpTitle(SettingsHelp.Scheduled) { helpEntry = it } },
                 supportingContent = {
                     Text(
                         if (scheduledInfo.count == 0) {
@@ -337,44 +338,53 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
             HorizontalDivider()
             SectionTitle("外观")
 
-            // 横向单选项，三档并排一行，节省纵向空间
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .selectableGroup()
-                    .padding(horizontal = 8.dp, vertical = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                for (mode in SettingsStore.ThemeMode.entries) {
-                    Row(
-                        Modifier
-                            .weight(1f)
-                            .clip(MaterialTheme.shapes.small)
-                            .selectable(
+            // 项目名 + 三档单选包在白色 surface 底上，与 ListItem 的默认底色一致
+            Column(Modifier.background(MaterialTheme.colorScheme.surface)) {
+                HelpTitle(
+                    SettingsHelp.Theme,
+                    onShow = { helpEntry = it },
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp),
+                )
+
+                // 横向单选项，三档并排一行，节省纵向空间
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .selectableGroup()
+                        .padding(horizontal = 8.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    for (mode in SettingsStore.ThemeMode.entries) {
+                        Row(
+                            Modifier
+                                .weight(1f)
+                                .clip(MaterialTheme.shapes.small)
+                                .selectable(
+                                    selected = themeMode == mode,
+                                    onClick = { settings.update(context, themeMode = mode) },
+                                    role = Role.RadioButton,
+                                )
+                                .padding(horizontal = 2.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(
                                 selected = themeMode == mode,
-                                onClick = { settings.update(context, themeMode = mode) },
-                                role = Role.RadioButton,
+                                onClick = null,
                             )
-                            .padding(horizontal = 2.dp, vertical = 8.dp),
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        RadioButton(
-                            selected = themeMode == mode,
-                            onClick = null,
-                        )
-                        Spacer(Modifier.width(2.dp))
-                        Text(
-                            modeLabel(mode),
-                            style = MaterialTheme.typography.bodyMedium,
-                            maxLines = 1,
-                        )
+                            Spacer(Modifier.width(2.dp))
+                            Text(
+                                modeLabel(mode),
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 1,
+                            )
+                        }
                     }
                 }
             }
 
             ListItem(
-                headlineContent = { Text("主页统计卡") },
+                headlineContent = { HelpTitle(SettingsHelp.StatCards) { helpEntry = it } },
                 supportingContent = { Text(statCards.joinToString(" / ") { it.label }) },
                 modifier = Modifier.clickable { showStatCards = true },
                 trailingContent = {
@@ -386,7 +396,7 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
             SectionTitle("跨设备")
 
             ListItem(
-                headlineContent = { Text("跨设备分享") },
+                headlineContent = { HelpTitle(SettingsHelp.Transfer) { helpEntry = it } },
                 supportingContent = { Text("同一 Wi-Fi 下与另一台设备配对，双向传输物品记录") },
                 trailingContent = {
                     OutlinedButton(onClick = onTransfer) { Text("打开") }
@@ -397,7 +407,7 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
             SectionTitle("自动同步")
 
             ListItem(
-                headlineContent = { Text("自动同步") },
+                headlineContent = { HelpTitle(SettingsHelp.AutoSync) { helpEntry = it } },
                 supportingContent = {
                     Text(
                         if (autoSyncEnabled) "已开启：同一 Wi-Fi 下自动发现设备并交换数据"
@@ -405,7 +415,7 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
                     )
                 },
                 trailingContent = {
-                    Switch(
+                    AppSwitch(
                         checked = autoSyncEnabled,
                         onCheckedChange = { enabled ->
                             settings.update(context, autoSyncEnabled = enabled)
@@ -420,10 +430,10 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
             )
 
             ListItem(
-                headlineContent = { Text("开机自动同步") },
+                headlineContent = { HelpTitle(SettingsHelp.AutoSyncOnBoot) { helpEntry = it } },
                 supportingContent = { Text("开机后恢复 30 分钟一次的局域网同步排程") },
                 trailingContent = {
-                    Switch(
+                    AppSwitch(
                         checked = autoSyncOnBoot,
                         onCheckedChange = { enabled ->
                             settings.update(context, autoSyncOnBoot = enabled)
@@ -439,7 +449,7 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
             )
 
             ListItem(
-                headlineContent = { Text("立即同步") },
+                headlineContent = { HelpTitle(SettingsHelp.SyncNow) { helpEntry = it } },
                 supportingContent = { Text("马上与已发现的设备交换一次数据") },
                 trailingContent = {
                     OutlinedButton(onClick = {
@@ -455,7 +465,7 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
             )
 
             ListItem(
-                headlineContent = { Text("待合并冲突") },
+                headlineContent = { HelpTitle(SettingsHelp.Conflicts) { helpEntry = it } },
                 supportingContent = {
                     Text(
                         if (pendingConflicts.isEmpty()) "暂无需要人工确认的物品"
@@ -472,7 +482,7 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
             SectionTitle("备份")
 
             ListItem(
-                headlineContent = { Text("导出备份") },
+                headlineContent = { HelpTitle(SettingsHelp.Export) { helpEntry = it } },
                 supportingContent = { Text("打包 data.json 与全部图片（.zip）") },
                 trailingContent = {
                     OutlinedButton(onClick = { exportLauncher.launch(Backup.backupFileName()) }) {
@@ -482,7 +492,7 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
             )
 
             ListItem(
-                headlineContent = { Text("导入备份") },
+                headlineContent = { HelpTitle(SettingsHelp.Import) { helpEntry = it } },
                 supportingContent = { Text("支持本应用导出的备份") },
                 trailingContent = {
                     OutlinedButton(onClick = {
@@ -495,7 +505,7 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
             SectionTitle("数据")
 
             ListItem(
-                headlineContent = { Text("清空全部数据") },
+                headlineContent = { HelpTitle(SettingsHelp.ClearData) { helpEntry = it } },
                 supportingContent = { Text("删除所有物品与图片，不可恢复") },
                 trailingContent = {
                     TextButton(onClick = { showClearConfirm = true }) {
@@ -691,6 +701,11 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
                 TextButton(onClick = { showRomHelp = false }) { Text("知道了") }
             },
         )
+    }
+
+    // 标题旁「?」的详细说明；与上面的弹窗互不影响，可同时存在
+    helpEntry?.let { entry ->
+        SettingHelpDialog(entry) { helpEntry = null }
     }
 }
 

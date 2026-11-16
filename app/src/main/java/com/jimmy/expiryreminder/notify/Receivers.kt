@@ -4,6 +4,7 @@ import android.app.AlarmManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import com.jimmy.expiryreminder.core.AutoSyncEngine
 import com.jimmy.expiryreminder.core.ExpiryStore
 import com.jimmy.expiryreminder.core.SettingsStore
 import kotlinx.coroutines.CoroutineScope
@@ -90,6 +91,8 @@ internal suspend fun rescheduleAll(context: Context) {
         context, store,
         settings.notifyEnabled.value, settings.notifyTime.value, settings.useAlarmClock.value,
     )
+    // 系统重启/升级/改时区同样会清掉自动同步的 30 分钟兜底闹钟，这里一并按两个开关恢复
+    AutoSyncEngine.scheduleIfEnabled(context)
 }
 
 /** 开机重排：系统重启后闹钟全部丢失，按当前数据重新排程。 */

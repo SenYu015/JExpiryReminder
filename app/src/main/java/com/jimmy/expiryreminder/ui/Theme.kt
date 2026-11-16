@@ -25,7 +25,10 @@ private val AppShapes = Shapes(
 
 /**
  * 以蓝色为主色，并补全中性色层级：
- * 背景浅灰、卡片纯白、描边浅灰，让卡片内容从背景里「浮」出来。
+ * 背景中性浅灰（#F8F8F8）、卡片纯白、描边中性灰，让卡片内容从背景里「浮」出来。
+ *
+ * 注意：底色是中性灰，中性色层级（surfaceVariant / surfaceContainer* / outline）
+ * 也必须用中性灰。若留蓝色调（如 #F2F6FB），在灰底上会被对比成一整片发蓝的脏色。
  */
 private val LightColors = lightColorScheme(
     primary = Color(0xFF2F80ED),
@@ -38,23 +41,23 @@ private val LightColors = lightColorScheme(
     onTertiary = Color(0xFF3D2B00),
     error = Color(0xFFF56C6C),
     onError = Color.White,
-    // 浅蓝白底：卡片纯白浮在上面，接近 ColorOS 17 的柔和层次
-    background = Color(0xFFF7FAFE),
+    // 中性浅灰底（#F8F8F8）：卡片纯白浮在上面，白卡靠描边 + 轻阴影与底色区分
+    background = Color(0xFFF8F8F8),
     onBackground = Color(0xFF1F2D3D),
     surface = Color(0xFFFFFFFF),
     onSurface = Color(0xFF1F2D3D),
-    surfaceVariant = Color(0xFFF2F6FB),
+    surfaceVariant = Color(0xFFF3F4F6),
     onSurfaceVariant = Color(0xFF6B7280),
-    // 白底页面下卡片靠描边区分，描边略加深保证可见
-    outline = Color(0xFFE1E6ED),
-    outlineVariant = Color(0xFFEDF0F4),
+    // 灰底页面下卡片靠描边区分，描边用中性灰保证与底色同色相
+    outline = Color(0xFFE2E4E7),
+    outlineVariant = Color(0xFFEDEEF0),
     // surfaceContainer 系列：下拉菜单/弹层用，必须显式给中性灰，
     // 否则回退到 Material 基线的紫调（下拉框发粉的原因）
     surfaceContainerLowest = Color(0xFFFFFFFF),
-    surfaceContainerLow = Color(0xFFF7F8FA),
-    surfaceContainer = Color(0xFFF1F3F6),
-    surfaceContainerHigh = Color(0xFFEAEDF1),
-    surfaceContainerHighest = Color(0xFFE3E6EA),
+    surfaceContainerLow = Color(0xFFF7F7F8),
+    surfaceContainer = Color(0xFFF1F2F3),
+    surfaceContainerHigh = Color(0xFFEAEBED),
+    surfaceContainerHighest = Color(0xFFE4E5E7),
 )
 
 private val DarkColors = darkColorScheme(

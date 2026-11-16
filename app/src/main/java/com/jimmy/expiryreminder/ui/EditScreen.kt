@@ -16,7 +16,6 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -52,7 +51,6 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -482,15 +480,21 @@ fun EditScreen(
                     .padding(horizontal = 16.dp, vertical = 12.dp),
             ) {
                 // ============================================== 表单大卡（白底页面靠描边区分）
-                Column(
-                    Modifier
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = androidx.compose.foundation.BorderStroke(
+                        1.dp, MaterialTheme.colorScheme.outline,
+                    ),
+                    modifier = Modifier
                         .fillMaxWidth()
                         .widthIn(max = 640.dp)
                         .align(Alignment.CenterHorizontally),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    FormCard {
-                        EditSectionHeader("基本信息", "名称、空间与分类")
+                    Column(
+                        Modifier.fillMaxWidth().padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
                         // -------------------------------------- 物品名称
                         // 标签行右侧挂相似物品徽标：输入框内右侧已被「清空 ×」占着，
                         // 两个小按钮并排容易误触，所以挪到框外标签行右端。
@@ -515,7 +519,7 @@ fun EditScreen(
                             value = name,
                             onValueChange = { name = it; nameFromOcr = false },
                             placeholder = "如：维生素 C、护照、牛奶",
-                            fixedHeight = 52.dp,
+                            fixedHeight = 48.dp,
                             modifier = Modifier.fillMaxWidth(),
                             focusRequester = nameFocus,
                             showClear = true,
@@ -711,10 +715,6 @@ fun EditScreen(
                                 },
                             )
                         }
-                    }
-
-                    FormCard {
-                        EditSectionHeader("日期与数量", "到期日期可由生产日期与有效期推算")
 
                         // -------------------------------------- 生产日期 / 有效期 / 单位
                         // 外层按左右两半分：生产日期占左半（与到期日期对齐），
@@ -750,7 +750,7 @@ fun EditScreen(
                                                 shelfLifeFromOcr = false
                                             },
                                             placeholder = "选填",
-                                            fixedHeight = 52.dp,
+                                            fixedHeight = 48.dp,
                                             modifier = Modifier.fillMaxWidth(),
                                             showClear = true,
                                             keyboardType = KeyboardType.Number,
@@ -848,10 +848,6 @@ fun EditScreen(
                                 )
                             }
                         }
-                    }
-
-                    FormCard {
-                        EditSectionHeader("提醒与补充")
 
                         // -------------------------------------- 提前提醒
                         FieldLabel("提前提醒")
@@ -878,7 +874,7 @@ fun EditScreen(
                             value = note,
                             onValueChange = { note = it.take(MAX_NOTE) },
                             placeholder = "存放位置、开封日期等",
-                            fixedHeight = 52.dp,
+                            fixedHeight = 48.dp,
                             modifier = Modifier.fillMaxWidth(),
                             showClear = true,
                         )
@@ -1030,10 +1026,6 @@ fun EditScreen(
             }
 
             // ---------------------------------------------- 底部固定保存栏
-            HorizontalDivider(
-                thickness = 1.dp,
-                color = MaterialTheme.colorScheme.outlineVariant,
-            )
             Surface(color = MaterialTheme.colorScheme.surface) {
             Button(
                 onClick = {
@@ -1080,9 +1072,9 @@ fun EditScreen(
                 },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 14.dp)
-                    .height(54.dp),
-                shape = RoundedCornerShape(16.dp),
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
+                    .height(50.dp),
+                shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.primary,
                 ),
@@ -2018,53 +2010,4 @@ private fun Modifier.dashedBorder(color: Color, cornerRadius: Dp): Modifier = dr
         0f, 0f, size.width, size.height,
         cornerRadius.toPx(), cornerRadius.toPx(), paint,
     )
-}
-
-/** 分组卡片：统一圆角、浅描边与内边距，长表单拆开后不再是一整块白板。 */
-@Composable
-private fun FormCard(content: @Composable ColumnScope.() -> Unit) {
-    Surface(
-        shape = RoundedCornerShape(20.dp),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 1.dp,
-        border = androidx.compose.foundation.BorderStroke(
-            1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f),
-        ),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(
-            Modifier.fillMaxWidth().padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            content = content,
-        )
-    }
-}
-
-/** 表单分组标题：主色文字 + 细分割线，把长表单切成三段，视觉层级更清楚。 */
-@Composable
-private fun EditSectionHeader(title: String, caption: String? = null) {
-    Column(Modifier.fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                title,
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.primary,
-                fontWeight = FontWeight.Bold,
-            )
-            Spacer(Modifier.width(10.dp))
-            HorizontalDivider(
-                Modifier.weight(1f),
-                thickness = 1.dp,
-                color = MaterialTheme.colorScheme.outlineVariant,
-            )
-        }
-        if (!caption.isNullOrBlank()) {
-            Text(
-                caption,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 2.dp),
-            )
-        }
-    }
 }

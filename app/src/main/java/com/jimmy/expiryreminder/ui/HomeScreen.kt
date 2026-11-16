@@ -28,7 +28,6 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -67,8 +66,6 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -85,6 +82,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -98,6 +96,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.draw.drawBehind
@@ -111,6 +110,7 @@ import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChangeIgnoreConsumed
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -343,11 +343,13 @@ fun HomeScreen(
         it != Spaces.ALL && it.isNotEmpty() && store.spaceOf(it) != null
     }
 
-    // ------------------------------- 顶部磨砂 / 底部浮动：高度测量与滚动进度
+    // ------------------------------- 顶部毛玻璃 / 底部浮动：高度测量与滚动进度
     val density = LocalDensity.current
     val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     var topBarHeightPx by remember { mutableIntStateOf(0) }
+    // 分类行顶边：遮罩只铺到这里，分类行整条保持全透，底下滚过的卡片能透出来
+    var catRowTopPx by remember { mutableIntStateOf(0) }
     // 遮罩强度只跟滚动距离有关：滚到顶 0（完全透明，露出干净底色），往下 28dp 内就升满。
     // 上升区间必须短——内容刚进入遮罩时如果遮罩还是半透明，标题就会和背后的列表文字重影；
     // 一旦升满，真正的淡出交给遮罩自身的竖渐变（底部全透明）去完成。
@@ -361,18 +363,17 @@ fun HomeScreen(
         }
     }
     val frostColor = MaterialTheme.colorScheme.background
-    // 遮罩向下多铺一小段（24dp）露出淡出带：列表第一条正好从这段之后开始，
-    // 静止时不会被压白，滚动时卡片就是在这 24dp 里由清晰过渡到消失
-    val maskTail = 12.dp
-    // 内容让位：固定块 + 淡出带；底部留出浮动条高度（都以实测为准，换字号也不会错位）
+    // 列表内容让位的余量：静止时第一条卡片离分类行底边留 16dp，不会贴着按钮。
+    val maskTail = 16.dp
+    // 内容让位：固定块 + 余量；底部留出浮动条高度（都以实测为准，换字号也不会错位）
     val topContentPadding = if (topBarHeightPx > 0) {
         with(density) { topBarHeightPx.toDp() } + maskTail
     } else {
         statusTop + 92.dp + maskTail
     }
-    // 底部浮动条高度是固定 dp（54/52/58 取最高 + 上下 12dp 内边距），不随字号变化，
-    // 所以直接算常量，省一次测量回调；再留 24dp 余量，最后一条不会贴到按钮上
-    val bottomContentPadding = if (selectMode) 16.dp else navBottom + 94.dp
+    // 底部浮动条高度是固定 dp（28dp 上内边距（含 16dp 渐隐带）+ 56dp 按钮 + 12dp 下内边距 = 96dp），
+    // 不随字号变化，所以直接算常量，省一次测量回调；再留 16dp 余量，最后一条不会贴到按钮上
+    val bottomContentPadding = if (selectMode) 16.dp else navBottom + 112.dp
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -403,119 +404,127 @@ fun HomeScreen(
                 .fillMaxSize(),
         ) {
             // ---------------------------------------------- 整页一个滚动容器
-            // 只有列表在这条 LazyColumn 里滚；标题、统计卡、分类行都是上方固定块，
-            // 列表滚到固定块下面时被遮罩逐级淡出。
-            LazyColumn(
-                Modifier
-                    .fillMaxSize()
-                    .categorySlide({ slide.value }, slideShiftPx)
-                    // 整页右滑切上一个分类；左滑不接管，列表行照旧左滑删除
-                    .swipeRightToSwitchCategory { if (!selectMode) switchCategory(-1) },
-                state = listState,
-                contentPadding = PaddingValues(
-                    start = 16.dp,
-                    end = 16.dp,
-                    top = topContentPadding,
-                    bottom = bottomContentPadding,
-                ),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                // ---------------------------------------------- 列表 / 空态
-                if (filtered.isEmpty()) {
-                    // 空态与列表共用同一套进场动画，切到没有记录的分类时同样有「翻过去了」的反馈
-                    item(key = "empty") {
-                        Box(
-                            Modifier
-                                .fillMaxWidth()
-                                .fillParentMaxHeight(0.66f),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Box(
-                                    Modifier
-                                        .size(64.dp)
-                                        .background(
-                                            MaterialTheme.colorScheme.surfaceVariant, CircleShape,
-                                        ),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    Icon(
-                                        Icons.Filled.DateRange,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.outline,
-                                        modifier = Modifier.size(28.dp),
-                                    )
-                                }
-                                Spacer(Modifier.height(12.dp))
-                                Text(
-                                    if (state.loaded) "暂无物品" else "加载中…",
-                                    style = MaterialTheme.typography.titleMedium,
-                                )
-                                if (state.loaded) {
-                                    Spacer(Modifier.height(4.dp))
+            // 只有列表在这条 LazyColumn 里滚；标题、统计卡、分类行都是上方固定块。
+            // 这块列表同时是毛玻璃的「取景源」：标题带和下面每颗玻璃按钮都从这里抓像素做模糊。
+            //
+            // 外层按分类 key：切分类时整块列表节点连同它内部的 item 动画器一起重建。
+            // 不这样做的话，旧分类的行会在 animateItem 的消失动画里被动画器继续持有并绘制，
+            // 新分类的卡片只盖住大部分，卡片之间的空隙里会露出上一屏的行（表现为「残留」）。
+            key(filter.category) {
+                LazyColumn(
+                    Modifier
+                        .fillMaxSize()
+                        .categorySlide({ slide.value }, slideShiftPx)
+                        // 整页右滑切上一个分类；左滑不接管，列表行照旧左滑删除
+                        .swipeRightToSwitchCategory { if (!selectMode) switchCategory(-1) },
+                    state = listState,
+                    contentPadding = PaddingValues(
+                        start = 16.dp,
+                        end = 16.dp,
+                        top = topContentPadding,
+                        bottom = bottomContentPadding,
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    // ---------------------------------------------- 列表 / 空态
+                    if (filtered.isEmpty()) {
+                        // 空态与列表共用同一套进场动画，切到没有记录的分类时同样有「翻过去了」的反馈
+                        item(key = "empty") {
+                            Box(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .fillParentMaxHeight(0.66f),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Box(
+                                        Modifier
+                                            .size(64.dp)
+                                            .background(
+                                                MaterialTheme.colorScheme.surfaceVariant, CircleShape,
+                                            ),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Icon(
+                                            Icons.Filled.DateRange,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.outline,
+                                            modifier = Modifier.size(28.dp),
+                                        )
+                                    }
+                                    Spacer(Modifier.height(12.dp))
                                     Text(
-                                        "点底部 + 添加第一件物品",
+                                        if (state.loaded) "暂无物品" else "加载中…",
+                                        style = MaterialTheme.typography.titleMedium,
+                                    )
+                                    if (state.loaded) {
+                                        Spacer(Modifier.height(4.dp))
+                                        Text(
+                                            "点底部 + 添加第一件物品",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        grouped.forEach { (status, items) ->
+                            item(key = "header_${status.name}") {
+                                Row(
+                                    Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Box(
+                                        Modifier
+                                            .size(8.dp)
+                                            .background(hexColor(status.color), CircleShape),
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        status.label,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    Spacer(Modifier.weight(1f))
+                                    Text(
+                                        "${items.size}",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
                                 }
                             }
-                        }
-                    }
-                } else {
-                    grouped.forEach { (status, items) ->
-                        item(key = "header_${status.name}") {
-                            Row(
-                                Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 2.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Box(
-                                    Modifier
-                                        .size(8.dp)
-                                        .background(hexColor(status.color), CircleShape),
-                                )
-                                Spacer(Modifier.width(6.dp))
-                                Text(
-                                    status.label,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                                Spacer(Modifier.weight(1f))
-                                Text(
-                                    "${items.size}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                        }
-                        items(items.size, key = { items[it].id }) { index ->
-                            val item = items[index]
-                            // 新增/删除/移动时条目自带位移动画，接近流体动效的连续感
-                            Box(Modifier.animateItem()) {
-                                ItemRow(
-                                    item = item,
-                                    store = store,
-                                    selectMode = selectMode,
-                                    selected = item.id in selected,
-                                    showSpace = filter.space == Spaces.ALL,
-                                    onClick = {
-                                        if (selectMode) {
-                                            selected =
-                                                if (item.id in selected) selected - item.id
-                                                else selected + item.id
-                                        } else onEdit(item.id)
-                                    },
-                                    onLongClick = {
-                                        if (!selectMode) {
-                                            selectMode = true
-                                            selected = setOf(item.id)
-                                        }
-                                    },
-                                    onSwipeDelete = { pendingDelete = item },
-                                    onViewImages = { origin ->
-                                        viewer = ViewerState(item.images.map { it.path }, 0, origin)
-                                    },
-                                )
+                            items(items.size, key = { items[it].id }) { index ->
+                                val item = items[index]
+                                // 新增/删除/移动时条目自带位移动画，接近流体动效的连续感。
+                                // 但不要淡出：切分类时整批行会同时消失，消失动画会让旧行在
+                                // 卡片之间的空隙里多留一会儿（表现为上一屏的行「残留」）
+                                Box(Modifier.animateItem(fadeOutSpec = null)) {
+                                    ItemRow(
+                                        item = item,
+                                        store = store,
+                                        selectMode = selectMode,
+                                        selected = item.id in selected,
+                                        showSpace = filter.space == Spaces.ALL,
+                                        onClick = {
+                                            if (selectMode) {
+                                                selected =
+                                                    if (item.id in selected) selected - item.id
+                                                    else selected + item.id
+                                            } else onEdit(item.id)
+                                        },
+                                        onLongClick = {
+                                            if (!selectMode) {
+                                                selectMode = true
+                                                selected = setOf(item.id)
+                                            }
+                                        },
+                                        onSwipeDelete = { pendingDelete = item },
+                                        onViewImages = { origin ->
+                                            viewer = ViewerState(item.images.map { it.path }, 0, origin)
+                                        },
+                                    )
+                                }
                             }
                         }
                     }
@@ -523,8 +532,12 @@ fun HomeScreen(
             }
 
             // ---------------------------------------------- 顶部固定遮罩（渐变淡出）
-            // 固定在页面顶部，本身是一条贯穿的竖向渐变：顶端不透明，向下逐级变淡，
-            // 到遮罩底缘完全透明。内容滚进来时被逐级「吃掉」，是连续淡出而不是撞上一条边界。
+            // 固定在页面顶部：实心部分盖住标题与统计卡（挡住滚上来的卡片）。
+            // 淡出带只允许出现在「统计卡底 → 分类行顶」那条空隙里——
+            // 分类行这一整条容器必须完全透明（用户要求，勿回退）：
+            // 按钮背后不许有任何遮罩/底色，透出来的是清晰的卡片，
+            // 边界只靠按钮自己的立体描边 + 投影区分。
+            // 不用第三方模糊库——稳定和兼容优先，卡片在这里被实色「吃掉」而不是被模糊。
             Column(
                 Modifier
                     .align(Alignment.TopCenter)
@@ -533,27 +546,22 @@ fun HomeScreen(
                     .drawBehind {
                         val a = frostAlpha()
                         if (a <= 0f) return@drawBehind
-                        // 固定块高度 = 遮罩的实心主体；再向下多铺 maskTail 做过渡带，
-                        // 淡化全在过渡带里完成，固定块里的文字始终压在足够实的底上，读得清。
-                        val total = size.height + maskTail.toPx()
-                        // 一条从遮罩底缘往上连续变实的曲线（smoothstep）：底缘全透明，
-                        // 约 120dp 内平滑收满，再往上保持不透明。
-                        // 不用「实心段 + 16dp 突然淡出」的硬分段，也不会让中段太透、
-                        // 把固定块后面的列表卡片透出来。
-                        fun ss(x: Float): Float = x * x * (3f - 2f * x)
-                        // 渐变带高度：固定块下缘 40dp + 向下多铺的 12dp，
-                        // 上方的统计卡、副标题保持全实，不会透出背后的列表
-                        val fadePx = 52.dp.toPx()
-                        val frac = (fadePx / total).coerceIn(0.05f, 1f)
+                        // 统计栏下边界的透明过渡：从统计卡底边开始一路淡到固定块底边（分类行底边）归零。
+                        // 注意区分两件事：分类行 Row 自身没有任何底色/不透明度（容器是透明的），
+                        // 这里画的是父层遮罩的渐隐——滚上来的卡片在分类行区域里被逐渐吃掉，
+                        // 而不是整条清晰穿过、和按钮文字互相叠字。
+                        val body = if (catRowTopPx > 0) catRowTopPx.toFloat() else size.height
+                        val total = size.height.coerceAtLeast(1f)
+                        val solidEnd = (body / total).coerceIn(0.02f, 1f)
+                        val tailFrac = 1f - solidEnd
                         drawRect(
                             brush = Brush.verticalGradient(
-                                *(0..8).map { i ->
-                                    val t = i / 8f              // 0 = 遮罩顶部，1 = 遮罩底缘
-                                    val u = 1f - t              // 距底缘的比例
-                                    t to frostColor.copy(
-                                        alpha = a * ss((u / frac).coerceIn(0f, 1f)),
-                                    )
-                                }.toTypedArray()
+                                0f to frostColor.copy(alpha = a),
+                                solidEnd to frostColor.copy(alpha = a),
+                                // 按钮区上半段就先掉到三成：文字不会再和按钮标题叠在一起；
+                                // 到分类行底边归零，过渡是连续的
+                                (solidEnd + tailFrac * 0.5f) to frostColor.copy(alpha = a * 0.30f),
+                                1f to frostColor.copy(alpha = 0f),
                             ),
                             size = Size(size.width, total),
                         )
@@ -615,20 +623,19 @@ fun HomeScreen(
                                 )
                                 // 标题块与右侧按钮组之间留固定呼吸位，标题长短都不挤在一起
                                 Spacer(Modifier.width(12.dp))
-                                // 空间切换：当前空间名 + 下拉（同时是空间管理的入口）
+                                // 空间切换：当前空间名 + 下拉（同时是空间管理的入口）。
+                                // 与分类行三颗按钮同款毛玻璃：同一屏里只保留一种按钮语言。
                                 Box {
-                                    Surface(
-                                        onClick = { spaceMenuOpen = true },
-                                        shape = RoundedCornerShape(20.dp),
-                                        color = MaterialTheme.colorScheme.surface,
-                                        shadowElevation = 2.dp,
-                                        border = androidx.compose.foundation.BorderStroke(
-                                            1.dp, MaterialTheme.colorScheme.outlineVariant,
-                                        ),
-                                        modifier = Modifier.height(40.dp),
+                                    Box(
+                                        Modifier
+                                            .height(40.dp)
+                                            .frostedPanel()
+                                            .clickable { spaceMenuOpen = true },
                                     ) {
                                         Row(
-                                            Modifier.padding(horizontal = 12.dp),
+                                            Modifier
+                                                .fillMaxHeight()
+                                                .padding(horizontal = 12.dp),
                                             verticalAlignment = Alignment.CenterVertically,
                                         ) {
                                             Box(
@@ -743,26 +750,22 @@ fun HomeScreen(
                                         )
                                     }
                                 }
-                                // 与「全部空间」胶囊之间留 10dp：两颗都是 40dp 高，视觉上成组但不相连
+                                // 与「全部空间」胶囊之间留 10dp：两颗都是 40dp 高，视觉上成组但不相连。
                                 Spacer(Modifier.width(10.dp))
-                                Surface(
-                                    onClick = onSettings,
-                                    shape = CircleShape,
-                                    color = MaterialTheme.colorScheme.surface,
-                                    shadowElevation = 2.dp,
-                                    border = androidx.compose.foundation.BorderStroke(
-                                        1.dp, MaterialTheme.colorScheme.outlineVariant,
-                                    ),
-                                    modifier = Modifier.size(40.dp),
+                                // 形状保留圆形（图标钮），玻璃底/亮边与胶囊同款，摆在一起像同一个控件家族
+                                Box(
+                                    Modifier
+                                        .size(40.dp)
+                                        .frostedPanel(CircleShape)
+                                        .clickable(onClick = onSettings),
+                                    contentAlignment = Alignment.Center,
                                 ) {
-                                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                        Icon(
-                                            Icons.Filled.Settings,
-                                            contentDescription = "设置",
-                                            tint = MaterialTheme.colorScheme.onSurface,
-                                            modifier = Modifier.size(20.dp),
-                                        )
-                                    }
+                                    Icon(
+                                        Icons.Filled.Settings,
+                                        contentDescription = "设置",
+                                        tint = MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.size(20.dp),
+                                    )
                                 }
                             }
                             Spacer(Modifier.height(6.dp))
@@ -799,10 +802,18 @@ fun HomeScreen(
 
 
                 // ------------------------------------------ 分类切换器 + 分类/多选
+                // 这一整行容器完全透明（用户要求，勿回退）：顶部遮罩的淡出带
+                // 只允许出现在它上方那条空隙里，容器内不许有任何遮罩/底色。
+                // 三颗按钮各自是半透明面板，边界靠描边与投影区分。
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .padding(start = 16.dp, end = 16.dp, top = 14.dp),
+                        .onGloballyPositioned {
+                            // 相对外层固定块的位置：遮罩实心部分到这一行顶边为止，
+                            // 这一行容器内部零遮罩（透明由按钮自身面板负责）
+                            catRowTopPx = it.positionInParent().y.toInt()
+                        }
+                        .padding(start = 16.dp, end = 16.dp, top = CategoryRowTopPadding),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -884,7 +895,7 @@ fun HomeScreen(
                         }
                     }
 
-                    // 分类管理（独立页面）：与搜索框同一套磨砂浮起效果
+                    // 分类管理（独立页面）：同款毛玻璃，边框与另外两颗一致
                     Box(
                         Modifier
                             .frostedPanel()
@@ -909,11 +920,8 @@ fun HomeScreen(
                     Box(
                         Modifier
                             .frostedPanel(
-                                borderColor = if (selectMode) {
-                                    MaterialTheme.colorScheme.error
-                                } else {
-                                    Color.White.copy(alpha = 0.55f)
-                                },
+                                // 多选态用红色描边提示「再点一次退出」；平时走默认立体渐变边
+                                borderColor = if (selectMode) MaterialTheme.colorScheme.error else null,
                             )
                             .clickable {
                                 if (selectMode) {
@@ -1068,12 +1076,19 @@ fun HomeScreen(
 }
 
 /**
- * 首页统一的「磨砂浮起」底：半透明面板色 + 柔投影 + 一圈亮边。
+ * 首页「浮起面板」底：半透明面板 + 柔投影 + 一条能看清边界的立体描边。
+ *
+ * 透明度：默认 0.95，按钮背后的内容只剩极淡的轮廓，按钮文字干净可读；
+ * 需要承载数字/正文的地方（统计卡）由调用方传更高的 [fillAlpha] 保对比度。
+ *
+ * 描边为什么用渐变而不是白色亮边：白亮边落在浅色背景上等于没有边界。这里整圈走
+ * outlineVariant 灰线（上 0.62 → 中 0.82 → 底 0.95），四边都看得见；靠深浅差异做厚度，
+ * 上边略浅、下边最深，面板仍然是「压」在内容上的感觉。再配合 [Modifier.shadow] 起浮。
  *
  * 为什么不直接用 `Surface(color = 半透明, shadowElevation = x)`：
  * M3 的 Surface 会把容器色当作阴影底板一起画，颜色带 alpha 时这块底板就从圆角外
  * 透出一片**白色矩形**（统计卡、分类行、底部控件都中过招）。这里改成
- * `Modifier.shadow` 显式给一组中性阴影色，再单独叠背景层和亮边，绕开这个问题。
+ * `Modifier.shadow` 显式给一组中性阴影色，再单独叠背景层和描边，绕开这个问题。
  *
  * 末尾的 [Modifier.clip] 让水波纹和子内容都收在圆角里，阴影因为 `clip = false` 不被切掉。
  */
@@ -1082,19 +1097,46 @@ private fun Modifier.frostedPanel(
     shape: Shape = RoundedCornerShape(18.dp),
     elevation: Dp = 12.dp,
     fill: Color = MaterialTheme.colorScheme.surface,
-    borderColor: Color = Color.White.copy(alpha = 0.55f),
-    borderWidth: Dp = 0.8.dp,
-): Modifier = this
-    .shadow(
-        elevation = elevation,
-        shape = shape,
-        clip = false,
-        ambientColor = Color(0x14000000),
-        spotColor = Color(0x33000000),
+    fillAlpha: Float = 0.95f,
+    borderColor: Color? = null,
+    borderWidth: Dp = 1.2.dp,
+): Modifier {
+    val outline = MaterialTheme.colorScheme.outlineVariant
+    // 传了 borderColor 就整圈单色（多选态的警示红），否则用上亮下暗的立体渐变。
+    // 中段和底部都压得很深：容器全透之后，这条灰线是区分按钮边界的唯一依靠。
+    val edge: Brush = borderColor?.let { color ->
+        Brush.verticalGradient(
+            0f to color.copy(alpha = 0.55f),
+            1f to color,
+        )
+    } ?: Brush.verticalGradient(
+        // 上边界也必须是能看见的细线：之前这里用纯白高光，落在浅色背景上等于没有边界，
+        // 按钮顶部完全糊在页面里（用户反馈「按钮上边界无法辨认」）。
+        // 整圈都用 outlineVariant，只靠深浅做立体：上浅 → 中深 → 底最深。
+        0f to outline.copy(alpha = 0.62f),
+        0.45f to outline.copy(alpha = 0.82f),
+        1f to outline.copy(alpha = 0.95f),
     )
-    .background(fill.copy(alpha = 0.90f), shape)
-    .border(borderWidth, borderColor, shape)
-    .clip(shape)
+    return this
+        .shadow(
+            elevation = elevation,
+            shape = shape,
+            clip = false,
+            ambientColor = Color(0x14000000),
+            // 主阴影略收、方向明确：面板浮起来的同时底缘不会糊成一片灰
+            spotColor = Color(0x2B000000),
+        )
+        .background(fill.copy(alpha = fillAlpha), shape)
+        .border(borderWidth, edge, shape)
+        .clip(shape)
+}
+
+/**
+ * 分类行 Row 的顶部内边距，同时是顶部遮罩淡出带的高度：
+ * 淡出必须完全发生在「统计卡底 → 分类行顶」这条空隙里，一点不许侵进分类行容器。
+ * 两处共用一个常量，改一处必须同步另一处。
+ */
+private val CategoryRowTopPadding = 14.dp
 
 private fun countOf(
     grouped: List<Pair<ExpiryStatus, List<ExpiryItem>>>,
@@ -1102,11 +1144,12 @@ private fun countOf(
 ): Int = grouped.firstOrNull { it.first == status }?.second?.size ?: 0
 
 /**
- * 底部浮动操作区：搜索胶囊 + 独立拍照圆钮 + 绿色新增圆钮。
+ * 底部浮动操作区：搜索胶囊 + 独立拍照圆钮 + 新增圆钮。
  *
  * 三者各自成块浮在内容之上（不共用一条底板），高度统一 56dp、间距统一 10dp，
  * 固定吸底不随列表滚动；搜索占满左侧剩余宽度，拍照夹在中间。
- * 整条背后压一层「透明 → 背景色」的渐隐，列表滚到底时自然化开，不会撞到按钮上。
+ * 容器完全透明：不给整条垫任何渐隐底，透出的是清晰内容，
+ * 可读性靠三颗控件自身的半透明面板 + 立体描边 + 投影。
  * 键盘弹出时被顶到键盘上方，边输边看结果。
  */
 @Composable
@@ -1120,10 +1163,11 @@ private fun HomeFloatingBar(
     Box(
         modifier
             .fillMaxWidth()
-            // 底板彻底透明：只有三个控件本身浮在内容上，列表内容从它们之间和下面穿过
             .navigationBarsPadding()
             .imePadding()
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            // 容器完全透明（用户要求，勿回退）：不许给按钮所在容器垫任何渐隐底/不透明度，
+            // 透出的是清晰内容；可读性全靠三颗控件自身的半透明面板 + 描边 + 投影。
+            .padding(start = 16.dp, end = 16.dp, top = 28.dp, bottom = 12.dp),
     ) {
         Row(
             Modifier.fillMaxWidth(),
@@ -1219,7 +1263,7 @@ private fun HomeFloatingBar(
     }
 }
 
-/** 浮动圆钮：磨砂底 + 阴影 + 圆形裁切，尺寸、阴影、亮边由调用方定。 */
+/** 浮动圆钮：磨砂底 + 阴影 + 立体描边 + 圆形裁切，尺寸、阴影由调用方定。 */
 @Composable
 private fun FloatCircleButton(
     size: Dp,
@@ -1227,7 +1271,7 @@ private fun FloatCircleButton(
     elevation: Dp,
     description: String,
     onClick: () -> Unit,
-    borderColor: Color = Color.White.copy(alpha = 0.55f),
+    borderColor: Color? = null,
     content: @Composable () -> Unit,
 ) {
     Box(
@@ -1311,7 +1355,7 @@ private fun CountBadge(count: Int) {
     )
 }
 
-/** 参考稿统计卡：白底、左对齐彩色大数字 + 灰色标签。[dense] 用于 4 张以上时收窄，避免一行放不下。 */
+/** 参考稿统计卡：白底、居中彩色大数字 + 灰色标签。[dense] 用于 4 张以上时收窄，避免一行放不下。 */
 @Composable
 private fun StatCard(
     count: Int,
@@ -1320,13 +1364,16 @@ private fun StatCard(
     dense: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
-    // 与搜索框、分类行同一套磨砂浮起效果：半透明白底 + 白色亮边 + 柔投影
-    Box(modifier.frostedPanel()) {
+    // 与搜索框、分类行同一套磨砂浮起效果：半透明面板 + 立体描边 + 柔投影。
+    // 统计卡要放大数字，透太多会掉可读性，所以面板压得更实（0.92）
+    Box(modifier.frostedPanel(fillAlpha = 0.92f)) {
         Column(
-            Modifier.padding(
-                horizontal = if (dense) 8.dp else 14.dp,
-                vertical = if (dense) 10.dp else 12.dp,
-            )
+            Modifier
+                .fillMaxWidth()
+                .padding(
+                    horizontal = if (dense) 8.dp else 14.dp,
+                    vertical = if (dense) 10.dp else 12.dp,
+                )
         ) {
             Text(
                 "$count",
@@ -1335,6 +1382,8 @@ private fun StatCard(
                 fontWeight = FontWeight.Bold,
                 color = accent,
                 maxLines = 1,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(2.dp))
             Text(
@@ -1342,6 +1391,8 @@ private fun StatCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
             )
         }
     }
@@ -1368,27 +1419,54 @@ private fun ItemRow(
     // 圆角必须与缩略图一致（8dp），否则缩回终点形状不符会闪一下。
     val thumbRadiusPx = with(LocalDensity.current) { 8.dp.toPx() }
     var thumbOrigin by remember { mutableStateOf<ImageOrigin?>(null) }
+    val rowScope = rememberCoroutineScope()
+    // confirmValueChange 已在 material3 1.4 弃用：改用 SwipeToDismissBox 的 onDismiss 回调，
+    // 沉降后由 onDismiss 里 reset() 弹回原位
     val dismissState = rememberSwipeToDismissBoxState(
-        confirmValueChange = { value ->
-            if (value == SwipeToDismissBoxValue.EndToStart && !selectMode) {
-                onSwipeDelete()
-            }
-            // 无论确认与否都弹回原位，删除交给对话框
-            false
-        },
         positionalThreshold = { it * 0.5f },
     )
+
+    // 卡片圆角：色条内缩量、红底裁切都用它，避免三处各写一个数字后对不齐
+    val cardShape = RoundedCornerShape(24.dp)
+    // 左滑删除红底的显隐：静止时必须完全不画，只有真的在拖（或回弹动画中）才画。
+    // 注意不能用 dismissState.progress —— 它算的是「currentValue → targetValue 的过渡比例」，
+    // current 与 target 相等（静止在 Settled）时 AnchoredDraggable 的 progress 直接返回 1f，
+    // 并不是 0f。把它当透明度就等于红底常驻、满不透明地铺在卡片正下方，全靠卡片自己盖住；
+    // 而卡片圆角是抗锯齿的，盖不严，四个角和底边就会渗出一圈红边。
+    // offset 是 internal，取不到；dismissDirection 公开且只在位移为 0 时是 Settled，
+    // 正好当「是否在拖」用，而且它和 alpha 一样在绘制阶段读，拖动时不触发重组。
+    val redAlpha: () -> Float = {
+        val dragging = runCatching {
+            dismissState.dismissDirection != SwipeToDismissBoxValue.Settled
+        }.getOrDefault(false)
+        if (dragging) 1f else 0f
+    }
 
     SwipeToDismissBox(
         state = dismissState,
         enableDismissFromStartToEnd = false,
         // 多选态下整行都是「点选」区域，禁止左滑，避免露出删除红底
         enableDismissFromEndToStart = !selectMode,
+        onDismiss = { direction ->
+            if (direction == SwipeToDismissBoxValue.EndToStart && !selectMode) {
+                onSwipeDelete()
+            }
+            // 无论是否触发删除都弹回原位，删除交给对话框确认
+            rowScope.launch { dismissState.reset() }
+        },
         backgroundContent = {
             // 多选态不画删除底色：卡片选中色是半透明的，红底会透上来变成一片红
             if (!selectMode) {
                 Box(
-                    Modifier.fillMaxSize().background(MaterialTheme.colorScheme.error, RoundedCornerShape(24.dp)),
+                    Modifier
+                        .fillMaxSize()
+                        // 红底比卡片内缩 2dp：卡片圆角是抗锯齿边缘，两者严丝合缝对齐时
+                        // 下层总会渗出 1px 红边，内缩后红底的圆角完全落在卡片圆角以内。
+                        .padding(2.dp)
+                        .clip(cardShape)
+                        .background(MaterialTheme.colorScheme.error)
+                        // alpha 在绘制阶段才读，拖动时不触发重组；静止时是 0，一个像素都不画
+                        .graphicsLayer { alpha = redAlpha() },
                     contentAlignment = Alignment.CenterEnd,
                 ) {
                     Icon(
@@ -1399,41 +1477,56 @@ private fun ItemRow(
             }
         },
     ) {
-        Card(
-            shape = RoundedCornerShape(24.dp),
-            modifier = Modifier
+        // 不用 Card 的 1dp elevation：那层阴影在 Android 上会聚成一条紧贴卡片的深灰硬线，
+        // 配上 24dp 大圆角看着像「边框没画完」。这里换成和统计卡、分类行同源的柔阴影。
+        Box(
+            Modifier
                 .fillMaxWidth()
+                .shadow(
+                    elevation = 10.dp,
+                    shape = cardShape,
+                    clip = false,
+                    ambientColor = Color(0x12000000),
+                    spotColor = Color(0x26000000),
+                )
+                .background(
+                    // 选中色要和底色混成不透明色，否则会透出后面的内容
+                    if (selected) {
+                        androidx.compose.ui.graphics.lerp(
+                            MaterialTheme.colorScheme.surface,
+                            MaterialTheme.colorScheme.primary,
+                            0.10f,
+                        )
+                    } else {
+                        MaterialTheme.colorScheme.surface
+                    },
+                    cardShape,
+                )
+                .clip(cardShape)
                 .combinedClickable(onClick = onClick, onLongClick = onLongClick),
-            colors = CardDefaults.cardColors(
-                // 选中色要和底色混成不透明色，否则会透出后面的内容
-                containerColor = if (selected) {
-                    androidx.compose.ui.graphics.lerp(
-                        MaterialTheme.colorScheme.surface,
-                        MaterialTheme.colorScheme.primary,
-                        0.10f,
-                    )
-                } else {
-                    MaterialTheme.colorScheme.surface
-                },
-            ),
-            // 参考通知中心：干净的大圆角白卡，去掉四周描边与彩色角落
-            elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
         ) {
             Row(
-                Modifier.height(IntrinsicSize.Min),
+                Modifier
+                    // 分类色条：长度对齐卡片左边框的「直线段」——上下各缩一个圆角半径，
+                    // 正好落在左右两段圆弧的起止点之间；卡片特别矮时保底 24dp，色条不会被挤没。
+                    // 直接 drawBehind 画，不参与布局：行高由内容自然决定，不再需要
+                    // IntrinsicSize.Min + fillMaxHeight 那一套（省掉一次内建测量）。
+                    .drawBehind {
+                        val barColor = hexColor(store.categoryColorOf(item.category))
+                        val minBar = 24.dp.toPx()
+                        val inset = ((size.height - minBar) / 2f)
+                            .coerceIn(0f, 24.dp.toPx())
+                        drawRoundRect(
+                            color = barColor,
+                            topLeft = Offset(8.dp.toPx(), inset),
+                            size = Size(4.dp.toPx(), (size.height - inset * 2).coerceAtLeast(0f)),
+                            cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx()),
+                        )
+                    },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                // 分类色条：固定 34dp 的短条，垂直居中；不再跟着行高拉长
-                Box(
-                    Modifier
-                        .padding(start = 8.dp)
-                        .width(4.dp)
-                        .height(34.dp)
-                        .background(
-                            hexColor(store.categoryColorOf(item.category)),
-                            RoundedCornerShape(2.dp),
-                        ),
-                )
+                // 原来「8dp 内缩 + 4dp 色条」占的 12dp：色条改由 drawBehind 画，这里只留空位
+                Spacer(Modifier.width(12.dp))
                 Row(
                     Modifier.weight(1f).padding(horizontal = 12.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,

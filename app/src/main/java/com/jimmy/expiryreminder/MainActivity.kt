@@ -172,16 +172,21 @@ class MainActivity : ComponentActivity() {
                     val homeFilter = rememberSaveable(saver = HomeFilterState.Saver) {
                         HomeFilterState()
                     }
-                    // 主页离开组合（跳编辑页等）时暂存它内部所有 rememberSaveable 状态，
-                    // 返回时原样恢复——否则列表滚动位置会丢，回到顶部。
-                    // 只包主页：编辑页等二级页每次进入都应是干净的，不恢复上次草稿。
-                    val homeStateHolder = rememberSaveableStateHolder()
-                    // 二级页面按返回键回到主页，不直接退出应用
-                    BackHandler(enabled = screen != Screen.Home) {
-                        screen = Screen.Home
+                    // 被访问的页面离开组合时暂存它内部所有 rememberSaveable 状态，
+                    // 返回时原样恢复——否则列表/设置项的滚动位置会丢，回到顶部。
+                    // 只包主页与设置页：编辑页等每次进入都应是干净的，不恢复上次草稿。
+                    val pageStateHolder = rememberSaveableStateHolder()
+                    // 二级页面按返回键回到来源页（按 Screen.origin 判定），主页再按才退出应用
+                    fun goBack() {
+                        screen = when (val s = screen) {
+                            is Screen.Transfer -> s.origin.toScreen()
+                            is Screen.Conflicts -> s.origin.toScreen()
+                            else -> Screen.Home
+                        }
                     }
+                    BackHandler(enabled = screen != Screen.Home) { goBack() }
                     when (val s = screen) {
-                        is Screen.Home -> homeStateHolder.SaveableStateProvider(key = "home") {
+                        is Screen.Home -> pageStateHolder.SaveableStateProvider(key = "home") {
                             HomeScreen(
                                 filter = homeFilter,
                                 onAdd = { defaultCategory, defaultSpace ->
@@ -247,13 +252,15 @@ class MainActivity : ComponentActivity() {
                                 onDone = { screen = Screen.Home },
                             )
                         }
-                        is Screen.Settings -> SettingsScreen(
-                            onBack = { screen = Screen.Home },
-                            onTransfer = { screen = Screen.Transfer(emptyList()) },
-                            onConflicts = { screen = Screen.Conflicts },
-                        )
+                        is Screen.Settings -> pageStateHolder.SaveableStateProvider(key = "settings") {
+                            SettingsScreen(
+                                onBack = { screen = Screen.Home },
+                                onTransfer = { screen = Screen.Transfer(origin = Origin.Settings) },
+                                onConflicts = { screen = Screen.Conflicts(origin = Origin.Settings) },
+                            )
+                        }
                         is Screen.Conflicts -> ConflictsScreen(
-                            onBack = { screen = Screen.Home },
+                            onBack = { goBack() },
                         )
                         is Screen.Categories -> CategoryScreen(
                             onBack = { screen = Screen.Home },
@@ -263,7 +270,7 @@ class MainActivity : ComponentActivity() {
                         )
                         is Screen.Transfer -> TransferScreen(
                             itemIds = s.itemIds,
-                            onBack = { screen = Screen.Home },
+                            onBack = { goBack() },
                         )
                     }
                 }
@@ -287,7 +294,7 @@ sealed interface Screen {
     data object Settings : Screen
 
     /** 自动同步发现的疑似重复物品，逐条人工合并。 */
-    data object Conflicts : Screen
+    data class Conflicts(val origin: Origin = Origin.Home) : Screen
 
     /** 分类管理（独立页面，不再是弹窗）。 */
     data object Categories : Screen
@@ -296,7 +303,10 @@ sealed interface Screen {
     data object Spaces : Screen
 
     /** 跨设备传输：从首页多选「分享」进来时带 [itemIds]，从设置进来时为空。 */
-    data class Transfer(val itemIds: List<String> = emptyList()) : Screen
+    data class Transfer(
+        val itemIds: List<String> = emptyList(),
+        val origin: Origin = Origin.Home,
+    ) : Screen
 
     /** 选图页。[initialUris] 用于从识别进度页返回时带回已选照片。 */
     data class PickImages(
@@ -314,6 +324,26 @@ sealed interface Screen {
 }
 
 /**
+ * 二级页的来源。同页面可能从不同入口进入，返回时必须回到来处而不是固定回主页：
+ * 主页「分享」→ 传输页回主页；设置 → 传输页 / 冲突合并页回设置。
+ */
+enum class Origin {
+    Home,
+    Settings;
+
+    fun toScreen(): Screen = when (this) {
+        Home -> Screen.Home
+        Settings -> Screen.Settings
+    }
+}
+
+/** 从 Saver 的 map 里还原来源；字段缺失或取值异常时按主页处理（兼容旧的状态包）。 */
+private fun originFrom(name: Any?): Origin {
+    val key = name as? String ?: return Origin.Home
+    return enumValues<Origin>().firstOrNull { it.name == key } ?: Origin.Home
+}
+
+/**
  * Screen 不是 Bundle 可保存类型（自定义 sealed 类），直接 rememberSaveable 会在
  * 首帧组合时抛 IllegalArgumentException 导致启动即闪退，这里换成手动序列化。
  */
@@ -327,12 +357,16 @@ private val ScreenSaver = mapSaver(
                 "space" to (screen.defaultSpace ?: ""),
             )
             is Screen.Settings -> mapOf("name" to "settings")
-            is Screen.Conflicts -> mapOf("name" to "conflicts")
+            is Screen.Conflicts -> mapOf(
+                "name" to "conflicts",
+                "origin" to screen.origin.name,
+            )
             is Screen.Categories -> mapOf("name" to "categories")
             is Screen.Spaces -> mapOf("name" to "spaces")
             is Screen.Transfer -> mapOf(
                 "name" to "transfer",
                 "ids" to ArrayList(screen.itemIds),
+                "origin" to screen.origin.name,
             )
             is Screen.PickImages -> mapOf(
                 "name" to "pick",
@@ -352,11 +386,12 @@ private val ScreenSaver = mapSaver(
     restore = { map ->
         when (map["name"]) {
             "settings" -> Screen.Settings
-            "conflicts" -> Screen.Conflicts
+            "conflicts" -> Screen.Conflicts(origin = originFrom(map["origin"]))
             "categories" -> Screen.Categories
             "spaces" -> Screen.Spaces
             "transfer" -> Screen.Transfer(
                 (map["ids"] as? List<*>)?.mapNotNull { it as? String }.orEmpty(),
+                origin = originFrom(map["origin"]),
             )
             "edit" -> Screen.Edit(
                 itemId = (map["itemId"] as? String)?.takeIf { it.isNotEmpty() },

@@ -1,6 +1,9 @@
 package com.jimmy.expiryreminder.ui
 
 import android.graphics.BitmapFactory
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -10,9 +13,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -34,12 +39,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
@@ -313,6 +321,74 @@ private fun InputBoxShell(
                 it()
             }
         }
+    }
+}
+
+/**
+ * 统一开关样式（自绘，不直接用 Material3 的 Switch）。
+ *
+ * 不用原生 Switch 的两个原因：
+ * 1. 关闭态默认 thumb = outline、track = surfaceContainerHighest，而本项目这两个中性色
+ *    几乎同色（#E1E6ED / #E3E6EA），圆点会整个融进轨道、看起来只剩一个灰胶囊；
+ * 2. 原生 thumb 尺寸随状态变化（选中 24dp / 未选中 16dp），拨动时圆点会「变大变小」，
+ *    这里固定 24dp，两态视觉完全一致。
+ *
+ * 尺寸沿用 M3 的比例：轨道 52×32dp、圆点直径 24dp、圆点四周留 4dp。
+ */
+@Composable
+fun AppSwitch(
+    checked: Boolean,
+    onCheckedChange: ((Boolean) -> Unit)?,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
+    val trackWidth = 52.dp
+    val trackHeight = 32.dp
+    val thumbSize = 24.dp
+    // 圆点在轨道内的上下留白，也是左右两端的起始留白
+    val thumbPadding = 4.dp
+    val animatedOffset by animateDpAsState(
+        targetValue = if (checked) trackWidth - thumbSize - thumbPadding else thumbPadding,
+        animationSpec = tween(durationMillis = 180),
+        label = "switchThumbOffset",
+    )
+    val trackColor by animateColorAsState(
+        targetValue = if (checked) {
+            MaterialTheme.colorScheme.primary
+        } else {
+            MaterialTheme.colorScheme.surfaceContainerHighest
+        },
+        animationSpec = tween(durationMillis = 180),
+        label = "switchTrackColor",
+    )
+
+    Box(
+        modifier
+            .size(trackWidth, trackHeight)
+            .clip(CircleShape)
+            .background(if (enabled) trackColor else trackColor.copy(alpha = 0.5f))
+            .then(
+                if (onCheckedChange != null) {
+                    Modifier.toggleable(
+                        value = checked,
+                        enabled = enabled,
+                        role = Role.Switch,
+                        onValueChange = onCheckedChange,
+                    )
+                } else {
+                    Modifier
+                },
+            ),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Box(
+            Modifier
+                .offset(x = animatedOffset)
+                .size(thumbSize)
+                // 一点阴影，让白点在浅灰轨道上更「实」
+                .shadow(elevation = 1.dp, shape = CircleShape, clip = false)
+                .background(Color.White.copy(alpha = if (enabled) 1f else 0.6f), CircleShape),
+        )
     }
 }
 
