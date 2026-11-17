@@ -206,6 +206,11 @@ abstract class ExpiryWidgetBase : AppWidgetProvider() {
 
     override fun onReceive(context: Context, intent: Intent) {
         super.onReceive(context, intent)
+        android.util.Log.d(
+            "WidgetToggle",
+            "onReceive action=${intent.action} target=${intent.getStringExtra(EXTRA_TARGET_MODE)} " +
+                "force=${intent.getStringExtra(EXTRA_FORCE_MODE)}",
+        )
         when (intent.action) {
             ACTION_REFRESH -> {
                 val mgr = AppWidgetManager.getInstance(context)
@@ -240,6 +245,11 @@ abstract class ExpiryWidgetBase : AppWidgetProvider() {
         val mode = forcedMode?.takeIf {
             it == WidgetPrefs.MODE_CYCLE || it == WidgetPrefs.MODE_COUNTDOWN
         } ?: WidgetPrefs.resolveMode(context, snapshot.dataStamp, snapshot.autoMode)
+        android.util.Log.d(
+            "WidgetToggle",
+            "updateOne id=$id forced=$forcedMode mode=$mode stamp=${snapshot.dataStamp.hashCode()} " +
+                "cd=${snapshot.countdown.size} cyc=${snapshot.cycle.size}",
+        )
         val count = snapshot.countOf(mode)
         val dark = WidgetTheme.isDark(context)
         val palette = WidgetTheme.palette(dark)
@@ -288,11 +298,12 @@ abstract class ExpiryWidgetBase : AppWidgetProvider() {
         )
         views.setViewVisibility(R.id.widget_bg_image, android.view.View.GONE)
 
-        // 每个 widget 实例 + 每种模式用独立 data URI，避免多个小组件/切换前后共用一个适配器
+        // adapter URI 固定为实例级（不按模式拆分）：ColorOS 启动器对 URI 变更不重建连接，
+        // 按模式拆分会让旧模式的残留工厂与新模式工厂互相覆盖列表（「闪一下又弹回」）；
+        // 模式由 Factory 每次 onDataSetChanged 动态读 WidgetPrefs，天然与 Provider 一致。
         val adapter = Intent(context, ExpiryWidgetService::class.java).apply {
             putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, id)
-            putExtra(EXTRA_MODE, mode)
-            data = Uri.parse("jexpiry://widget/$id/$mode")
+            data = Uri.parse("jexpiry://widget/$id")
         }
         views.setRemoteAdapter(R.id.widget_list, adapter)
         views.setEmptyView(R.id.widget_list, R.id.widget_empty)
@@ -351,8 +362,6 @@ abstract class ExpiryWidgetBase : AppWidgetProvider() {
         const val ACTION_REFRESH = "com.jimmy.expiryreminder.action.WIDGET_REFRESH"
         /** 点椭圆标签切换列表的私有广播（无界面、不带起应用）。 */
         const val ACTION_TOGGLE = "com.jimmy.expiryreminder.action.WIDGET_TOGGLE"
-        /** adapter intent 携带当前列表模式，保证标题计数与列表内容一致。 */
-        const val EXTRA_MODE = "com.jimmy.expiryreminder.extra.WIDGET_MODE"
         /** 切换中转 Activity 读取：要切到的目标列表模式。 */
         const val EXTRA_TARGET_MODE = "com.jimmy.expiryreminder.extra.WIDGET_TARGET_MODE"
 

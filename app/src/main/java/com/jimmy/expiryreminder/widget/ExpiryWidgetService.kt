@@ -1,6 +1,5 @@
 package com.jimmy.expiryreminder.widget
 
-import android.appwidget.AppWidgetManager
 import android.content.Context
 import android.content.Intent
 import android.widget.RemoteViews
@@ -11,16 +10,15 @@ import com.jimmy.expiryreminder.R
 /** 给小组件的 ListView 提供数据；列表滑动由启动器原生处理，不需要额外权限。 */
 class ExpiryWidgetService : RemoteViewsService() {
     override fun onGetViewFactory(intent: Intent): RemoteViewsFactory =
-        Factory(
-            applicationContext,
-            intent.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, AppWidgetManager.INVALID_APPWIDGET_ID),
-            intent.getStringExtra(ExpiryWidgetBase.EXTRA_MODE) ?: WidgetPrefs.MODE_COUNTDOWN,
-        )
+        Factory(applicationContext)
 
+    /**
+     * 工厂不缓存模式：部分启动器（ColorOS）对 adapter intent 变更不重建连接，
+     * 按模式拆分 data URI 会留下旧模式的残留工厂，与新模式工厂互相覆盖列表。
+     * 每次刷新动态读 WidgetPrefs 的当前模式，所有连接渲染结果一致，天然无竞态。
+     */
     private class Factory(
         private val context: Context,
-        @Suppress("UNUSED_PARAMETER") private val widgetId: Int,
-        private val mode: String,
     ) : RemoteViewsService.RemoteViewsFactory {
 
         private var items: List<WidgetItem> = emptyList()
@@ -28,8 +26,10 @@ class ExpiryWidgetService : RemoteViewsService() {
         override fun onCreate() = Unit
 
         override fun onDataSetChanged() {
-            // 跟随 adapter intent 传入的模式取对应列表；手动选择的持久化由 Provider 负责
-            items = WidgetData.load(context).rowsOf(mode)
+            val snapshot = WidgetData.load(context)
+            val mode = WidgetPrefs.resolveMode(context, snapshot.dataStamp, snapshot.autoMode)
+            items = snapshot.rowsOf(mode)
+            android.util.Log.d("WidgetToggle", "factory onDataSetChanged mode=$mode rows=${items.size}")
         }
 
         override fun onDestroy() {

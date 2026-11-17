@@ -42,17 +42,28 @@ object WidgetPrefs {
         // 判断实际类型，旧格式或非字符串一律清掉、回退自动，保证升级不崩溃。
         val savedStamp = runCatching { p.all[KEY_STAMP] as? String }.getOrNull()
         if (savedStamp == null || savedStamp != dataStamp) {
+            android.util.Log.d(
+                "WidgetToggle",
+                "resolveMode clear manual=$mode savedHash=${savedStamp?.hashCode()} nowHash=${dataStamp.hashCode()} -> auto=$autoMode",
+            )
             p.edit().remove(KEY_MODE).remove(KEY_STAMP).apply()
             return autoMode
         }
+        android.util.Log.d("WidgetToggle", "resolveMode keep manual=$mode")
         return mode
     }
 
     /** 用户点标题手动切到指定模式，并记录此刻的数据指纹。 */
     fun setManualMode(context: Context, mode: String, dataStamp: String) {
+        android.util.Log.d(
+            "WidgetToggle",
+            "setManualMode mode=$mode stampHash=${dataStamp.hashCode()}",
+        )
+        // commit 而非 apply：切换后进程可能随即被系统回收，apply 异步落盘有丢失窗口，
+        // 丢一次就回退自动模式，看起来「点了没切换」。两个字符串的同步写开销可忽略。
         prefs(context).edit()
             .putString(KEY_MODE, mode)
             .putString(KEY_STAMP, dataStamp)
-            .apply()
+            .commit()
     }
 }

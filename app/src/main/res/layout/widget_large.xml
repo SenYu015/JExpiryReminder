@@ -25,29 +25,30 @@
         android:orientation="vertical"
         android:padding="16dp">
 
-        <LinearLayout
+        <!-- 标题行用 FrameLayout：数字锚定左侧，切换椭圆在整行水平居中，
+             不随计数字位数（1↔2 位）左右漂移，避免点击落空 -->
+        <FrameLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
             android:paddingBottom="10dp">
 
             <TextView
                 android:id="@+id/widget_count"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:layout_gravity="start|center_vertical"
                 android:text="0"
                 android:textColor="#1F2D3D"
                 android:textSize="41sp"
                 android:textStyle="bold"
                 android:includeFontPadding="false" />
 
-            <!-- 切换椭圆：两个 label 同框，点哪个切到哪个；左侧留 12dp 与数字拉开距离 -->
+            <!-- 切换椭圆：两个 label 同框，点哪个切到哪个 -->
             <LinearLayout
                 android:id="@+id/widget_mode_pill"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="12dp"
+                android:layout_gravity="center"
                 android:orientation="horizontal"
                 android:background="@drawable/widget_mode_pill_light"
                 android:gravity="center_vertical"
@@ -82,34 +83,37 @@
                     android:textStyle="bold" />
             </LinearLayout>
 
-            <TextView
-                android:layout_width="0dp"
-                android:layout_height="1dp"
-                android:layout_weight="1" />
+            <!-- 相机键与新增键锚定右侧；底色与图标色由 ExpiryWidgetProvider 按主题设置 -->
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="end|center_vertical"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
 
-            <!-- 相机键：进应用内选图（拍照）页；底色与图标色由 ExpiryWidgetProvider 按主题设置 -->
-            <ImageView
-                android:id="@+id/widget_camera"
-                android:layout_width="44dp"
-                android:layout_height="44dp"
-                android:layout_marginEnd="8dp"
-                android:background="@drawable/widget_cam_bg_light"
-                android:contentDescription="拍照录入"
-                android:padding="10dp"
-                android:scaleType="fitCenter"
-                android:src="@drawable/ic_widget_camera" />
+                <ImageView
+                    android:id="@+id/widget_camera"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
+                    android:layout_marginEnd="8dp"
+                    android:background="@drawable/widget_cam_bg_light"
+                    android:contentDescription="拍照录入"
+                    android:padding="10dp"
+                    android:scaleType="fitCenter"
+                    android:src="@drawable/ic_widget_camera" />
 
-            <TextView
-                android:id="@+id/widget_add"
-                android:layout_width="44dp"
-                android:layout_height="44dp"
-                android:background="@drawable/widget_add_bg"
-                android:gravity="center"
-                android:includeFontPadding="false"
-                android:text="+"
-                android:textColor="#FFFFFF"
-                android:textSize="27sp" />
-        </LinearLayout>
+                <TextView
+                    android:id="@+id/widget_add"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
+                    android:background="@drawable/widget_add_bg"
+                    android:gravity="center"
+                    android:includeFontPadding="false"
+                    android:text="+"
+                    android:textColor="#FFFFFF"
+                    android:textSize="27sp" />
+            </LinearLayout>
+        </FrameLayout>
 
         <ListView
             android:id="@+id/widget_list"
