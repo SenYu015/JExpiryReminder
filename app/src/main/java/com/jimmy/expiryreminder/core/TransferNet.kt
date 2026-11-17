@@ -17,6 +17,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import java.io.BufferedInputStream
@@ -45,6 +47,16 @@ private const val CONNECT_TIMEOUT_MS = 8_000
 private const val SEND_TIMEOUT_MS = 120_000
 /** 空间同步要等对方选空间 + 双方各自合并，给的时间比单向发送长一些。 */
 private const val SYNC_TIMEOUT_MS = 180_000L
+
+/** 同一 IP 的配对尝试限速：防止脚本刷弹窗、赌用户手滑点「接受」。 */
+private const val PAIR_RATE_WINDOW_MS = 60_000L
+private const val PAIR_RATE_MAX = 3
+
+/** 同时在处理的连接数上限，避免局域网里有人开一堆 socket 把线程与内存吃满。 */
+private const val MAX_CLIENTS = 8
+
+/** 传输载荷加密格式标识（AES-CTR + HMAC-SHA256，见 [StreamCrypto]）。 */
+private const val ENC_STREAM = "aes-ctr-hmac"
 
 /**
  * 极简的行分隔 JSON 协议：每条消息一行 JSON，二进制载荷跟在 header 后面按 size 精确读取。
@@ -143,6 +155,9 @@ class TransferServer(
     private val tokens = ConcurrentHashMap<String, String>() // token -> 对端 deviceId
     private val pendingPair = AtomicReference<CompletableDeferred<Boolean>?>(null)
     private val pendingSync = AtomicReference<CompletableDeferred<String?>?>(null)
+    private val clientSlots = Semaphore(MAX_CLIENTS)
+    /** ip -> 最近几次配对尝试的时间戳；只在 [allowPairAttempt] 里读写。 */
+    private val pairAttempts = HashMap<String, MutableList<Long>>()
 
     fun start(): Int {
         serverSocket?.let { return _port.value }
@@ -160,7 +175,9 @@ class TransferServer(
                 } catch (_: Exception) {
                     break
                 }
-                launch { handle(client) }
+                launch {
+                    clientSlots.withPermit { handle(client) }
+                }
             }
         }
         return socket.localPort
@@ -178,6 +195,7 @@ class TransferServer(
         _syncOffer.value = null
         _incoming.value = emptyList()
         tokens.clear()
+        synchronized(pairAttempts) { pairAttempts.clear() }
         // 未收录的批次离开页面即作废，顺手清掉缓存文件，免得 cache 越攒越大
         runCatching {
             TransferPayload.inboxDir(context).listFiles()?.forEach { it.delete() }
@@ -211,7 +229,7 @@ class TransferServer(
                         output,
                         JSONObject().put("ok", true).put("name", deviceName).put("id", deviceId),
                     )
-                    "pair" -> handlePair(output, msg)
+                    "pair" -> handlePair(socket, output, msg)
                     "send" -> handleSend(input, output, msg)
                     "sync" -> handleSync(input, output, msg)
                     else -> TransferWire.writeMessage(
@@ -224,7 +242,29 @@ class TransferServer(
         }
     }
 
-    private suspend fun handlePair(output: OutputStream, msg: JSONObject) {
+    /**
+     * 同一 IP 的配对限速。配对弹窗是整条链路上唯一的「人肉确认」，
+     * 不限速的话邻居可以反复弹窗碰用户误触。
+     */
+    private fun allowPairAttempt(ip: String): Boolean {
+        val now = System.currentTimeMillis()
+        synchronized(pairAttempts) {
+            val list = pairAttempts.getOrPut(ip) { mutableListOf() }
+            list.removeAll { now - it > PAIR_RATE_WINDOW_MS }
+            if (list.size >= PAIR_RATE_MAX) return false
+            list.add(now)
+            return true
+        }
+    }
+
+    private suspend fun handlePair(socket: Socket, output: OutputStream, msg: JSONObject) {
+        val ip = socket.inetAddress?.hostAddress ?: "unknown"
+        if (!allowPairAttempt(ip)) {
+            TransferWire.writeMessage(
+                output, JSONObject().put("ok", false).put("error", "请求过于频繁，请稍后再试"),
+            )
+            return
+        }
         if (pendingPair.get() != null) {
             TransferWire.writeMessage(output, JSONObject().put("ok", false).put("error", "对方正忙，请稍后重试"))
             return
@@ -232,6 +272,11 @@ class TransferServer(
         val pin = msg.optString("pin")
         val fromName = msg.optString("device").ifBlank { "另一台设备" }
         val fromId = msg.optString("deviceId")
+        // 设备标识是自动同步信任表的键，缺失就无法把这次配对记成长期信任，直接拒绝
+        if (fromId.isBlank()) {
+            TransferWire.writeMessage(output, JSONObject().put("ok", false).put("error", "对方设备标识缺失"))
+            return
+        }
         val deferred = CompletableDeferred<Boolean>()
         pendingPair.set(deferred)
         _pairRequest.value = PairRequest(
@@ -256,11 +301,14 @@ class TransferServer(
         }
         val token = UUID.randomUUID().toString().replace("-", "")
         tokens[token] = fromId
+        // 长期信任密钥：重复配对复用原值，避免把对方手上的旧密钥顶掉
+        val secret = PeerTrust.ensure(context, fromId, fromName)
         TransferWire.writeMessage(
             output,
             JSONObject()
                 .put("ok", true)
                 .put("token", token)
+                .put("secret", secret)
                 .put("name", deviceName)
                 .put("id", deviceId),
         )
@@ -268,19 +316,39 @@ class TransferServer(
 
     private fun handleSend(input: InputStream, output: OutputStream, msg: JSONObject) {
         val token = msg.optString("token")
-        if (tokens[token] == null) {
+        val fromId = tokens[token]
+        if (fromId == null) {
             TransferWire.writeMessage(output, JSONObject().put("ok", false).put("error", "配对已失效，请重新配对"))
             return
         }
+        // 物品包一律加密：图片里常有发票、证件、家庭照，不能让同网设备直接嗅到
+        val trust = PeerTrust.of(context, fromId)
+        if (trust == null) {
+            TransferWire.writeMessage(output, JSONObject().put("ok", false).put("error", "未配对设备，请重新配对"))
+            return
+        }
+        if (msg.optString("enc") != ENC_STREAM) {
+            TransferWire.writeMessage(output, JSONObject().put("ok", false).put("error", "对方版本过旧，请升级后重试"))
+            return
+        }
         val size = msg.optLong("size")
-        if (size <= 0 || size > TransferPayload.MAX_BYTES) {
+        if (size <= 0 || size > TransferPayload.MAX_BYTES + 1024) {
             TransferWire.writeMessage(output, JSONObject().put("ok", false).put("error", "物品包为空或超出大小上限"))
             return
         }
-        val zip = File(TransferPayload.inboxDir(context), "in-${System.currentTimeMillis()}.zip")
-        zip.outputStream().buffered().use { out ->
+        val stamp = System.currentTimeMillis()
+        val enc = File(TransferPayload.inboxDir(context), "in-$stamp.enc")
+        val zip = File(TransferPayload.inboxDir(context), "in-$stamp.zip")
+        enc.outputStream().buffered().use { out ->
             TransferWire.copyExactly(input, out, size)
         }
+        if (!StreamCrypto.decryptTo(enc, zip, trust.secret)) {
+            enc.delete()
+            zip.delete()
+            TransferWire.writeMessage(output, JSONObject().put("ok", false).put("error", "物品包校验失败，可能被篡改"))
+            return
+        }
+        enc.delete()
         val batch = TransferPayload.readManifest(zip)
         if (batch == null || batch.items.isEmpty()) {
             zip.delete()
@@ -306,8 +374,18 @@ class TransferServer(
      */
     private suspend fun handleSync(input: InputStream, output: OutputStream, msg: JSONObject) {
         val token = msg.optString("token")
-        if (tokens[token] == null) {
+        val fromId = tokens[token]
+        if (fromId == null) {
             TransferWire.writeMessage(output, JSONObject().put("ok", false).put("error", "配对已失效，请重新配对"))
+            return
+        }
+        val trust = PeerTrust.of(context, fromId)
+        if (trust == null) {
+            TransferWire.writeMessage(output, JSONObject().put("ok", false).put("error", "未配对设备，请重新配对"))
+            return
+        }
+        if (msg.optString("enc") != ENC_STREAM) {
+            TransferWire.writeMessage(output, JSONObject().put("ok", false).put("error", "对方版本过旧，请升级后重试"))
             return
         }
         if (pendingSync.get() != null) {
@@ -315,12 +393,21 @@ class TransferServer(
             return
         }
         val size = msg.optLong("size")
-        if (size <= 0 || size > TransferPayload.MAX_BYTES) {
+        if (size <= 0 || size > TransferPayload.MAX_BYTES + 1024) {
             TransferWire.writeMessage(output, JSONObject().put("ok", false).put("error", "同步包为空或超出大小上限"))
             return
         }
-        val zip = File(TransferPayload.inboxDir(context), "sync-${System.currentTimeMillis()}.zip")
-        zip.outputStream().buffered().use { out -> TransferWire.copyExactly(input, out, size) }
+        val stamp = System.currentTimeMillis()
+        val enc = File(TransferPayload.inboxDir(context), "sync-$stamp.enc")
+        val zip = File(TransferPayload.inboxDir(context), "sync-$stamp.zip")
+        enc.outputStream().buffered().use { out -> TransferWire.copyExactly(input, out, size) }
+        if (!StreamCrypto.decryptTo(enc, zip, trust.secret)) {
+            enc.delete()
+            zip.delete()
+            TransferWire.writeMessage(output, JSONObject().put("ok", false).put("error", "同步包校验失败，可能被篡改"))
+            return
+        }
+        enc.delete()
         val batch = TransferPayload.readManifest(zip)
         if (batch == null) {
             zip.delete()
@@ -361,7 +448,12 @@ class TransferServer(
         // 回传合并后本机该空间的快照，对方据此补齐自己缺的那部分
         val snapshot = store.itemsInSpace(targetSpace)
         val reply = TransferPayload.writeZip(context, snapshot, deviceName)
+        val replyEnc = File(TransferPayload.inboxDir(context), "reply-${System.currentTimeMillis()}.enc")
         try {
+            if (!StreamCrypto.encryptTo(reply, replyEnc, trust.secret)) {
+                TransferWire.writeMessage(output, JSONObject().put("ok", false).put("error", "回传包加密失败"))
+                return
+            }
             TransferWire.writeMessage(
                 output,
                 JSONObject()
@@ -369,12 +461,14 @@ class TransferServer(
                     .put("added", applied.added)
                     .put("updated", applied.overwritten)
                     .put("count", snapshot.size)
-                    .put("size", reply.length()),
+                    .put("size", replyEnc.length())
+                    .put("enc", ENC_STREAM),
             )
-            reply.inputStream().buffered().use { it.copyTo(output) }
+            replyEnc.inputStream().buffered().use { it.copyTo(output) }
             output.flush()
         } finally {
             reply.delete()
+            replyEnc.delete()
         }
     }
 }
@@ -619,7 +713,13 @@ class TransferDiscovery(
 /** 发送端：配对 + 上传物品包。 */
 object TransferClient {
 
-    data class Paired(val token: String, val deviceName: String, val deviceId: String)
+    data class Paired(
+        val token: String,
+        val deviceName: String,
+        val deviceId: String,
+        /** 长期信任密钥（hex），用于自动同步的 HMAC 认证与载荷加密。 */
+        val secret: String,
+    )
 
     suspend fun pair(
         host: String,
@@ -650,50 +750,59 @@ object TransferClient {
                 token = json.optString("token"),
                 deviceName = json.optString("name").ifBlank { "对方设备" },
                 deviceId = json.optString("id"),
+                secret = json.optString("secret"),
             )
         }
     }
 
-    /** 上传 zip；[onProgress] 回传已发送字节数。返回对方确认收到的件数。 */
+    /** 上传 zip（先加密）；[onProgress] 回传已发送字节数。返回对方确认收到的件数。 */
     suspend fun send(
         host: String,
         port: Int,
         token: String,
         zip: File,
         count: Int,
+        secret: String,
         onProgress: (Long) -> Unit,
     ): Result<Int> = runCatching {
-        Socket().use { socket ->
-            socket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
-            socket.soTimeout = SEND_TIMEOUT_MS
-            val out = BufferedOutputStream(socket.getOutputStream())
-            TransferWire.writeMessage(
-                out,
-                JSONObject()
-                    .put("cmd", "send")
-                    .put("token", token)
-                    .put("count", count)
-                    .put("size", zip.length()),
-            )
-            zip.inputStream().buffered().use { input ->
-                val buf = ByteArray(64 * 1024)
-                var sent = 0L
-                while (true) {
-                    val n = input.read(buf)
-                    if (n < 0) break
-                    out.write(buf, 0, n)
-                    sent += n
-                    onProgress(sent)
+        val enc = File(zip.parentFile, zip.name + ".enc")
+        try {
+            if (!StreamCrypto.encryptTo(zip, enc, secret)) throw IOException("物品包加密失败")
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+                socket.soTimeout = SEND_TIMEOUT_MS
+                val out = BufferedOutputStream(socket.getOutputStream())
+                TransferWire.writeMessage(
+                    out,
+                    JSONObject()
+                        .put("cmd", "send")
+                        .put("token", token)
+                        .put("count", count)
+                        .put("size", enc.length())
+                        .put("enc", ENC_STREAM),
+                )
+                enc.inputStream().buffered().use { input ->
+                    val buf = ByteArray(64 * 1024)
+                    var sent = 0L
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        out.write(buf, 0, n)
+                        sent += n
+                        onProgress(sent)
+                    }
                 }
+                out.flush()
+                val line = TransferWire.readLine(BufferedInputStream(socket.getInputStream()))
+                    ?: throw IOException("对方没有响应")
+                val json = JSONObject(line)
+                if (!json.optBoolean("ok")) {
+                    throw IOException(json.optStringOrNull("error") ?: "发送失败")
+                }
+                json.optInt("count", count)
             }
-            out.flush()
-            val line = TransferWire.readLine(BufferedInputStream(socket.getInputStream()))
-                ?: throw IOException("对方没有响应")
-            val json = JSONObject(line)
-            if (!json.optBoolean("ok")) {
-                throw IOException(json.optStringOrNull("error") ?: "发送失败")
-            }
-            json.optInt("count", count)
+        } finally {
+            enc.delete()
         }
     }
 
@@ -709,54 +818,73 @@ object TransferClient {
         token: String,
         zip: File,
         count: Int,
+        secret: String,
         spaceLabel: String,
         replyDir: File,
         onProgress: (Long) -> Unit,
     ): Result<SyncReply> = runCatching {
-        Socket().use { socket ->
-            socket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
-            // 比服务端的确认超时再宽一点，避免两边同时放弃
-            socket.soTimeout = (SYNC_TIMEOUT_MS + 30_000).toInt()
-            val out = BufferedOutputStream(socket.getOutputStream())
-            TransferWire.writeMessage(
-                out,
-                JSONObject()
-                    .put("cmd", "sync")
-                    .put("token", token)
-                    .put("space", spaceLabel)
-                    .put("count", count)
-                    .put("size", zip.length()),
-            )
-            zip.inputStream().buffered().use { input ->
-                val buf = ByteArray(64 * 1024)
-                var sent = 0L
-                while (true) {
-                    val n = input.read(buf)
-                    if (n < 0) break
-                    out.write(buf, 0, n)
-                    sent += n
-                    onProgress(sent)
+        val enc = File(zip.parentFile, zip.name + ".enc")
+        try {
+            if (!StreamCrypto.encryptTo(zip, enc, secret)) throw IOException("同步包加密失败")
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+                // 比服务端的确认超时再宽一点，避免两边同时放弃
+                socket.soTimeout = (SYNC_TIMEOUT_MS + 30_000).toInt()
+                val out = BufferedOutputStream(socket.getOutputStream())
+                TransferWire.writeMessage(
+                    out,
+                    JSONObject()
+                        .put("cmd", "sync")
+                        .put("token", token)
+                        .put("space", spaceLabel)
+                        .put("count", count)
+                        .put("size", enc.length())
+                        .put("enc", ENC_STREAM),
+                )
+                enc.inputStream().buffered().use { input ->
+                    val buf = ByteArray(64 * 1024)
+                    var sent = 0L
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        out.write(buf, 0, n)
+                        sent += n
+                        onProgress(sent)
+                    }
                 }
-            }
-            out.flush()
+                out.flush()
 
-            val input = BufferedInputStream(socket.getInputStream())
-            val line = TransferWire.readLine(input) ?: throw IOException("对方没有响应")
-            val json = JSONObject(line)
-            if (!json.optBoolean("ok")) {
-                throw IOException(json.optStringOrNull("error") ?: "同步失败")
+                val input = BufferedInputStream(socket.getInputStream())
+                val line = TransferWire.readLine(input) ?: throw IOException("对方没有响应")
+                val json = JSONObject(line)
+                if (!json.optBoolean("ok")) {
+                    throw IOException(json.optStringOrNull("error") ?: "同步失败")
+                }
+                if (json.optString("enc") != ENC_STREAM) throw IOException("对方版本过旧，请升级后重试")
+                val size = json.optLong("size")
+                if (size < 0 || size > TransferPayload.MAX_BYTES + 1024) {
+                    throw IOException("回传包大小异常")
+                }
+                replyDir.mkdirs()
+                val stamp = System.currentTimeMillis()
+                val encReply = File(replyDir, "sync-reply-$stamp.enc")
+                val file = File(replyDir, "sync-reply-$stamp.zip")
+                encReply.outputStream().buffered().use { TransferWire.copyExactly(input, it, size) }
+                if (!StreamCrypto.decryptTo(encReply, file, secret)) {
+                    encReply.delete()
+                    file.delete()
+                    throw IOException("回传包校验失败，可能被篡改")
+                }
+                encReply.delete()
+                SyncReply(
+                    added = json.optInt("added"),
+                    updated = json.optInt("updated"),
+                    count = json.optInt("count"),
+                    zip = file,
+                )
             }
-            val size = json.optLong("size")
-            if (size < 0 || size > TransferPayload.MAX_BYTES) throw IOException("回传包大小异常")
-            replyDir.mkdirs()
-            val file = File(replyDir, "sync-reply-${System.currentTimeMillis()}.zip")
-            file.outputStream().buffered().use { TransferWire.copyExactly(input, it, size) }
-            SyncReply(
-                added = json.optInt("added"),
-                updated = json.optInt("updated"),
-                count = json.optInt("count"),
-                zip = file,
-            )
+        } finally {
+            enc.delete()
         }
     }
 }

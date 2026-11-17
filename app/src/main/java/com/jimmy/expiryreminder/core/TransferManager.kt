@@ -16,7 +16,6 @@ import java.io.File
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.util.UUID
-import kotlin.random.Random
 
 /**
  * 跨设备传输的会话编排：本机接收服务 + 局域网发现 + 发送流程。
@@ -202,8 +201,25 @@ class TransferManager private constructor() {
         return peer
     }
 
+    /** 配对码用加密安全随机：旧实现是 kotlin.random，种子可被时间推断。 */
+    private val pinRandom = java.security.SecureRandom()
+
     /** 4 位配对码，由发起方生成并显示，接收方比对后确认。 */
-    fun newPin(): String = String.format(java.util.Locale.US, "%04d", Random.nextInt(0, 10000))
+    fun newPin(): String = String.format(java.util.Locale.US, "%04d", pinRandom.nextInt(10_000))
+
+    /**
+     * 把配对结果记进长期信任表。密钥为空说明对端是旧版本（不返回 secret），
+     * 此时照旧可以手动传输，但自动同步不会与它建立通道。
+     */
+    private fun rememberTrust(context: Context, paired: TransferClient.Paired) {
+        if (paired.deviceId.isBlank() || paired.secret.isBlank()) return
+        PeerTrust.save(
+            context.applicationContext,
+            paired.deviceId,
+            paired.deviceName,
+            paired.secret,
+        )
+    }
 
     /**
      * 配对 + 发送。调用前 UI 已把 [pin] 显示给用户，接收方看到同样的数字才会点接受。
@@ -229,6 +245,8 @@ class TransferManager private constructor() {
             _sendState.value = null
             return@withContext Result.failure(error)
         }
+        // 配对成功即写入长期信任表：之后后台自动同步只认这张表里的设备
+        rememberTrust(context, paired)
 
         var zip: File? = null
         try {
@@ -249,6 +267,7 @@ class TransferManager private constructor() {
                 token = paired.token,
                 zip = file,
                 count = items.size,
+                secret = paired.secret,
             ) { sent ->
                 _sendState.update { it?.copy(sentBytes = sent, totalBytes = total) }
             }
@@ -315,6 +334,7 @@ class TransferManager private constructor() {
             _syncState.value = null
             return@withContext Result.failure(error)
         }
+        rememberTrust(context, paired)
 
         var zip: File? = null
         var replyZip: File? = null
@@ -332,6 +352,7 @@ class TransferManager private constructor() {
                 token = paired.token,
                 zip = file,
                 count = items.size,
+                secret = paired.secret,
                 spaceLabel = label,
                 replyDir = TransferPayload.inboxDir(context),
             ) { sent ->

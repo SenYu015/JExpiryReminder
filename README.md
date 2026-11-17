@@ -26,6 +26,9 @@ Gradle 走腾讯镜像、Maven 走阿里云镜像，无需代理。
   **全程离线**（ML Kit bundled 中文模型 + 已移除库带入的网络权限），照片不离开设备
 - **物品管理**：名称 / 空间 / 分类 / 生产日期 / 有效期（天·月·年，月末自动收敛）/ 到期日
   （可由生产日期+有效期推算，也可手动指定）/ 数量 / 备注；
+  有效期按含首尾计算（11-10 生产、1 个月效期 → 12-09 到期）；
+  支持**循环任务**（定期充电 / 清理 / 添置等）：设置周期后按「上次完成日 + 周期」推导到期日，
+  首页点「完成本次」即从完成日重新计时，新周期提醒独立触发；
   新增时默认「食品」，若主页正按某分类筛选则自动预选该分类
 - **空间归属**：物品归入某个空间（我的空间 / 爸妈家 / 公司…），也可以不归属任何空间（「未分配」，新增时默认如此）；
   顶部胶囊切换空间，默认「全部空间」（所有空间 + 未分配一起看），列表、统计卡、分类计数都跟着空间走；
@@ -41,6 +44,8 @@ Gradle 走腾讯镜像、Maven 走阿里云镜像，无需代理。
 - **通知**：AlarmManager 精确闹钟（`setExactAndAllowWhileIdle`），关掉应用也会推送；
   开机广播自动重排；精确闹钟权限未授予时自动降级为非精确闹钟 + 前台检查兜底；
   去重键 `<fireDate>:<itemId>:<days>`，FNV-1a 派生稳定通知 id
+- **隐私开关**（v1.27.20）：设置 → 通知与提醒 →「锁屏隐藏详情」，开启后锁屏与流体云只显示
+  「到期提醒 / N 件物品即将到期」，物品名只在解锁后可见
 - **备份**：SAF 导出/导入 zip（data.json + images/ + manifest.json），
   支持「覆盖」与「按 id 合并」两种模式
 - **跨设备分享**：同一 Wi-Fi 下用 mDNS 自动发现另一台设备 → 发起方生成 4 位配对码，
@@ -48,14 +53,17 @@ Gradle 走腾讯镜像、Maven 走阿里云镜像，无需代理。
   接收方先收到待接收批次，自己选择落到哪个空间（也可现场新建空间，默认「未分配」）后才真正入库；
   **入库前会检查同名物品**，由用户选择「直接新增 / 跳过同名 / 覆盖同名 / 人工逐条挑选」。
   全程局域网 TCP 直连，不经过任何服务器；发送的是副本，本机记录不受影响。
-  自动发现被路由器挡住时可手动填对方 IP。
+  配对成功后双方各自保存一把长期密钥，手动传输与自动同步的载荷都基于它加密；
+  设置页「已配对设备」里可随时解除信任。自动发现被路由器挡住时可手动填对方 IP。
 - **空间同步**：两台设备协商把同一个空间合并成一份（双向）。发起方选本机空间 → 配对 →
   上传快照；接收方选择自己的哪个空间参与合并 → 本机先合并 → 把合并后的快照回传 → 发起方再合并。
   匹配规则：名称（去空格、忽略大小写）+ 到期日相同视为同一件，同一件以 `updatedAt` 较新的为准；
   只增改、不删除。同样走局域网 TCP，不经过服务器
 - **自动同步**（设置页开关，默认关闭）：开启后应用进程常驻 mDNS 广播/发现，每 20 秒与同一 Wi-Fi 下的同伴
   交换一次增量；进程被回收时由 30 分钟一次的 AlarmManager 闹钟兜底唤醒。
-  独立服务类型 `_jexpiry-auto._tcp.`，不经过服务器、不需要配对码，**不改动现有手动分享链路**。
+  独立服务类型 `_jexpiry-auto._tcp.`，不经过服务器，**不改动现有手动分享链路**。
+  请求带 `HMAC-SHA256` 认证与 nonce 防重放，载荷（物品/分类/空间/图片索引）走 AES-256-GCM 加密；
+  **只与已配对设备同步**——未配对的设备既不读也写不进本机，需先在「跨设备分享」里配对一次。
 - **共同唯一 ID + 修改时间新者胜**（v1.24.0）：每条物品持久化 `syncId`，创建时生成、随编辑与同步传递、
   永不随改名/改日期变化；旧数据缺字段时由本地 id 稳定派生补发。
   - 认同一条记录的顺序：`syncId` → 本地 `id` → 稳定业务键（归一化名称 + 到期日 + 数量）；
@@ -76,23 +84,15 @@ Gradle 走腾讯镜像、Maven 走阿里云镜像，无需代理。
   它不是待办清单，因此**不设勾选框**。列表由启动器原生上下滑动，点条目进编辑页。
   **卡片、文字、行底色完全跟随应用浅色 / 深色主题**（由「外观与交互」统一控制），
   不再提供独立背景透明度与自定义背景图；切换主题时自动刷新桌面卡片
-- **内置离线语音**（v1.20.0）：ColorOS 17 没有向第三方开放 `RecognitionService`，
-  因此把 **Vosk 中文小模型（约 66MB）打进 APK**，首次使用解压到应用内部存储，之后完全本机识别。
-  名称/备注右侧是矢量麦克风图标，新增页标题栏另有「语音快速录入」入口（一句话拆名称/到期日/位置）；
-  弹窗显示实时部分结果，音频不落盘、不上传。只在点麦克风时申请 `RECORD_AUDIO`，
-  系统语音仅作为可选兜底（部分 ROM 才有）
-- **新增页布局**（v1.22.0，Material 3 Expressive）：长表单拆成三张独立分组卡片
-  「基本信息 / 日期与数量 / 提醒与补充」，每张 20dp 圆角、浅描边、14dp 内边距；
-  麦克风图标作为输入框的 `trailing` 内嵌，不再单独占一列；输入框统一 14dp 圆角 / 52dp 高；
-  表单最大宽度 640dp（Android 16 自适应布局，大屏不拉伸）；底部保存栏独立浅色容器 +
-  54dp / 16dp 圆角按钮，`imePadding` 保证键盘弹出时仍固定可见
-- **主页视觉外壳**（v1.26.0）：参考通知中心样式，标题区放大、设置按钮改为带轻描边的圆形按钮；
-  底部改为「悬浮胶囊工具条 + 独立绿色圆形新增按钮」；列表项改为 24dp 大圆角白卡，
-  去掉四周描边与彩色角落（不做假凝光），卡片间距加大到 12dp；统计卡同步去掉描边、加大圆角。
-  **内容布局与交互逻辑不变**
-- **设置页分组**（v1.25.0）：六个一级分类卡片「通知与提醒 / 外观与交互 / 跨设备同步 /
-  桌面小组件 / 数据与备份 / 关于」，每个分类可展开收起，内部再按「提醒开关、后台可靠性、
-  主题、页面、语音、手动分享、自动同步、备份、数据」等二级小标题组织，避免所有开关平铺
+- **语音输入已移除**：不再内置 Vosk 中文模型，也没有麦克风入口。
+  `RECORD_AUDIO` 权限、`queries`（`RecognitionService` / `RECOGNIZE_SPEECH`）、
+  `com.alphacephei:vosk-android` 依赖与 `assets/model-cn` 一并删除，APK 体积回落约 66MB；
+  录入只保留键盘输入与离线 OCR 预填
+- **新增页布局**（v1.27.18 起单卡紧凑）：三张分组卡片合并为一张 18dp 圆角单卡，
+  控件高度压到 44dp、chip 26dp、缩略图 64dp，主流机型一屏放下；
+  保存按钮改为主页同款磨砂胶囊浮在内容之上，`imePadding` 保证键盘弹出时仍可见
+- **设置页五个平铺分区**（v1.27.x）：通知与提醒 / 外观与显示 / 跨设备同步 / 数据与备份 / 关于；
+  不再折叠，分区标题配分割线，精确闹钟、忽略电池优化与自启动说明合并进「后台运行保障」
 - **交互**：主页按返回键直接回桌面（不再要求按两次）；图片查看器点图片/背景任意位置缩小淡出后最小化，
   双击与双指缩放保留
 - **离线 OCR 增强**：识别进度页显示读到的行数；添加页可展开「识别原文」，点一行补进备注，
@@ -105,12 +105,10 @@ Gradle 走腾讯镜像、Maven 走阿里云镜像，无需代理。
   返回手势的缩放+侧滑**，改为平台式淡入淡出（单 Activity 内没有可直接调用的 Activity 转场动画），
   避免「保存像被拖回去」的生硬感。手势返回仍走预测性返回；主页列表增删/移动保留
   `Modifier.animateItem()` 位移动画
-- **预测性返回**（Android 14+ 用平台回调，13 用 Compose 兜底）：每个二级页在 Activity 的
-  `OnBackInvokedDispatcher` 上注册 `OnBackAnimationCallback`，直接拿 `onBackProgressed` 的 0→1
-  做缩小/右移/压暗，和酷安那类应用的做法一致；进度在组合期换算成普通 Float 再交给
-  `graphicsLayer`，避免「手势走了页面不动」。顶部返回箭头和编辑页「保存」也走同一段退出动画。
-  关闭开关后走普通返回；Manifest 已开启 `enableOnBackInvokedCallback`，主页不拦截返回，
-  回到桌面仍能走 ColorOS 的预测动画
+- **返回手势**（v1.27.8 起）：ColorOS 17 实测不分发预测性返回进度（`onBackProgressed` 恒为 0），
+  改为应用自驱动的左边缘拖拽——32dp 手势条内页面 1:1 右移、底层主页可见并随进度压暗，
+  松手按位移（>33%）或速度（>1000px/s）提交或回弹；左上角返回与三键导航共用整页滑出转场，
+  主页不拦截返回（直接回桌面走系统动画）
 - **主页视觉**（v1.26.0）：参考通知中心样式，圆角层级 18/24/28dp、浅灰底 + 纯白卡片；
   标题栏圆形按钮、底部悬浮胶囊工具条与独立绿色圆形新增按钮；不再做假的「凝光」描边或彩色角落
 - **流体云 / 实时动态**（v1.26.0 修复）：7 天内到期物品合成一条 promoted ongoing 通知。
@@ -125,8 +123,11 @@ Gradle 走腾讯镜像、Maven 走阿里云镜像，无需代理。
 
 ## 数据格式
 
-- data.json **v10**：`items` / `categories` / `categoryColors` / `categoryLabels` / `categoryOrder` /
-  `spaces` / `spaceColors` / `revision`（`DATA_VERSION = 10`）
+- data.json **v12**：`items` / `categories` / `categoryColors` / `categoryLabels` / `categoryOrder` /
+  `spaces` / `spaceColors` / `revision`（`DATA_VERSION = 12`）
+- v11 → v12：物品增加 `items[].repeatEnabled`（循环任务标记，缺省 false）；循环物品复用
+  `productionDate` 作上次完成日、`shelfLife` + `shelfLifeUnit` 作周期，到期日始终按「起始日 + 周期 − 1 天」推导；
+  旧数据缺字段按普通物品读取，不回改历史到期日
 - v9 → v10：物品增加 `items[].syncId`（共同唯一 ID）；旧数据缺字段按空读取，首次落盘由
   `id` 派生 `"s_" + id` 补发，不需要人工迁移；两台设备离线各自录入的同一物品在同步时收敛到同一个 syncId
 - v8 → v9：物品增加 `items[].rev`（增量水位）、顶层增加 `revision`（本机逻辑时钟）；
@@ -138,7 +139,8 @@ Gradle 走腾讯镜像、Maven 走阿里云镜像，无需代理。
 - 图片存相对路径 `images/<id>.jpg`，随备份打包
 - v3 的内联 base64 图片加载时自动迁移成文件
 - 设置在 SharedPreferences `settings` 的单个 JSON 里，**v5** 起新增 `autoSyncEnabled`（缺省 false）；
-  **v6** 新增 `predictiveBackEnabled` / `liveUpdateEnabled` / `autoSyncOnBoot`（缺省均为 true）
+  **v6** 新增 `liveUpdateEnabled` / `autoSyncOnBoot`（缺省均为 true）；
+  **v7** 新增 `hideNotificationDetail`（缺省 false），旧版的 `predictiveBackEnabled` 已废弃、不再读取
 - 待合并冲突单独存 `auto_sync_conflicts.json`；每台设备的同步水位与「已同步 id」存
   `auto_sync_state.json`（`recvRev` / `sentRev`），都不进 data.json、不改数据版本
 
@@ -166,8 +168,7 @@ app/src/main/java/com/jimmy/expiryreminder/
 │   ├── Similarity.kt             # 名称归一化与二元组相似度（纯函数）
 │   ├── AutoSyncMerge.kt          # 合并计划 + 智能合并 + 待合并冲突持久化
 │   ├── SyncStateStore.kt         # 每台设备的同步水位、增量筛选、已同步 id
-│   ├── AutoSyncEngine.kt         # 自动同步引擎（独立 mDNS/TCP + 增量同步 + 闹钟排程）
-│   └── VoiceText.kt              # 一句话语音 → 名称/到期日/位置（纯函数，复用离线日期抽取）
+│   └── AutoSyncEngine.kt         # 自动同步引擎（独立 mDNS/TCP + 增量同步 + 闹钟排程）
 ├── notify/
 │   ├── ReminderService.kt        # 提醒计划计算 + AlarmManager 排程 + 前台兜底
 │   ├── Receivers.kt              # AlarmReceiver（触发通知）/ BootReceiver（开机重排）
@@ -187,9 +188,6 @@ app/src/main/java/com/jimmy/expiryreminder/
 │   └── ExpiryWidgetService.kt    # RemoteViewsService：可上下滑动的列表
 └── ui/
     ├── Theme.kt / Common.kt      # 主题、异步图片加载
-    ├── VoiceInput.kt             # Vosk 模型解压/缓存 + 可选系统语音兜底
-    ├── VoskEngine.kt             # AudioRecord → Vosk 流式识别（完全本机）
-    ├── VoiceInputDialog.kt       # 应用内语音弹窗（实时部分结果）
     ├── HomeScreen.kt             # 列表页（含识别入口）
     ├── PickImagesScreen.kt       # 选图页（拍照 + 相册，≤6）
     ├── OcrProgressScreen.kt      # 识别进度页
@@ -217,12 +215,11 @@ app/src/main/java/com/jimmy/expiryreminder/
   部分能力还依赖云端推理。按「不联网、本机优先」的约束**不接入**，继续用 ML Kit bundled 中文模型，
   并新增「识别原文」核对作为人工兜底。
 - **小布助手**：系统级语音助手，第三方接入走技能平台 / 快应用 / 快捷指令（需商务接入与服务侧能力），
-  没有公开 Android SDK 让普通 App 直接接收语音指令。**不接入**；
-  改用系统标准 `ACTION_RECOGNIZE_SPEECH` + 离线引擎约束实现语音转文字与语音快速建记录。
+  没有公开 Android SDK 让普通 App 直接接收语音指令。**不接入**；语音建记录方案已在本次改版中整体下线。
 - **ColorOS 17 离线语音**：官方的离线语音包（约 110–300MB）是给小布助手用的，**没有对第三方
   App 开放独立识别 SDK**；第三方可用的离线入口只有 Android 的 `SpeechRecognizer` 端侧识别
-  （`createOnDeviceSpeechRecognizer`，API 31+，需 `RECORD_AUDIO`）。因此 v1.18.0 改为应用内端侧识别，
-  端侧不可用时才退回系统识别器并强制离线偏好；设置页会显示当前走的是哪一种。
+  （`createOnDeviceSpeechRecognizer`，API 31+，需 `RECORD_AUDIO`），真机实测 ColorOS 未向第三方
+  开放 `RecognitionService`，内置 Vosk 又会让 APK 增大约 66MB，因此语音输入最终**整块移除**。
 - **流体云实测修正**：ColorOS 17 / Android 17 真机上，旧通知虽然带
   `android.requestPromotedOngoing=true`、ONGOING_EVENT、BigTextStyle 与高重要性渠道，
   但 `category=reminder` + `vis=PRIVATE` 时系统没有给 `FLAG_PROMOTED_ONGOING`。
@@ -245,16 +242,25 @@ app/src/main/java/com/jimmy/expiryreminder/
   开放平台面向应用商店/游戏/支付/主题等，**没有对普通第三方 App 开放的云盘/家庭共享 API**。
   即便存在，也会违反本项目「只允许同 Wi-Fi 同步」的安全约束，因此不接入；跨设备仍走局域网 TCP。
 
-## 安全边界（本轮强制）
+## 安全边界
 
-- 唯一的数据同步通道仍是**同一 Wi-Fi 内的 TCP 直连**（自动同步 `_jexpiry-auto._tcp.` + 原手动分享协议），
-  没有引入云端、蓝牙、账号、推送或任何其他同步方式；图片补传也复用这条 TCP 连接，
-  路径必须通过 `normalizeImagePath` 白名单（禁绝对路径、`..`、非图片扩展名），单张与单轮都有字节上限；
-- 本轮只新增 `POST_PROMOTED_NOTIFICATIONS` 一个**普通权限**（非运行时、不涉及隐私数据，
-  仅用于把到期汇总提升为实时动态/流体云）；其余能力不新增权限：小组件只读应用内部存储、
-  语音只在点麦克风时申请 `RECORD_AUDIO`，音频交给系统端侧识别引擎、不落盘不上传，
-  小组件 Service `exported=false` + `BIND_REMOTEVIEWS`；
-- 语音识别强制离线，系统无离线引擎时入口直接禁用，不存在静默联网回退；
+- 唯一的数据同步通道是**同一 Wi-Fi 内的 TCP 直连**（自动同步 `_jexpiry-auto._tcp.` + 手动分享协议），
+  没有云端、蓝牙、账号、推送或任何其他同步方式；
+- **身份**：只有手动配对过的设备才能参与同步。配对时接收端生成 32 字节长期密钥（重复配对复用原值），
+  双方各存一份；未配对设备的请求一律拒绝且不回数据。设置页「已配对设备」可解除信任；
+- **认证**：每条同步/取图请求带 `HMAC-SHA256(secret, cmd|from|nonce|ts)`，时间窗 120 秒 + nonce 去重，
+  响应同样签名；配对码用 `SecureRandom` 生成，同一 IP 每分钟最多 3 次尝试；
+- **加密**：自动同步载荷与图片走 AES-256-GCM；手动分享/空间同步的 zip 走 AES-256-CTR + HMAC-SHA256
+  （流式，内存恒定），完整性校验不通过即丢弃，不落盘；
+- **解包上限**：备份与传输包按「单条 8–12MB / 累计 256MB / 条目数 1000–2000」三重限制读取，
+  避免 zip 炸弹把进程撑到 OOM；路径仍过 `normalizeImagePath` 白名单（禁绝对路径、`..`、非图片扩展名）；
+- **落盘**：`data.json` 及其它状态文件走「临时文件 + fsync + rename」，覆盖前保留 `.bak`，
+  解析失败自动回退，杜绝写一半导致的整库丢失；
+- **系统备份排除**：`allowBackup=false` + `dataExtractionRules` 排除 files/sharedpref/database/cache，
+  云备份与换机直传不会带走物品、图片与同步密钥；迁移只用应用内 SAF 导出；
+- **权限**：仅 `POST_PROMOTED_NOTIFICATIONS` 一个普通权限与本轮无关地保留；
+  小组件只读应用内部存储，Service `exported=false` + `BIND_REMOTEVIEWS`；已移除 `RECORD_AUDIO`；
+- **可见性**：设置页「锁屏隐藏详情」开启后，通知与流体云在锁屏上只显示汇总文案；
 - 冲突只在本机持久化，合并只增改不删除；`syncId` / `updatedAt` / `rev` 仅通过局域网 TCP 交换，不上传。
 
 ## 备注
@@ -275,9 +281,8 @@ app/src/main/java/com/jimmy/expiryreminder/
   不可换成 `play-services-mlkit-text-recognition-chinese`（需联网下模型）
 - **APK 体积**：OCR 的 native 库每个 ABI 7–11MB，已用 `ndk.abiFilters` 只保留 `arm64-v8a` + `armeabi-v7a`，
   从 56MB 降到 29MB（release）。代价：x86 模拟器装不上，真机不受影响，需要模拟器调试时临时把 ABI 加回来
-- **内置 Vosk 模型**：APK 从约 29MB 增至 **约 87MB**；首次点麦克风时把 66MB 模型解压到
-  `files/vosk-cn`（几秒），之后直接复用。模型为 Apache-2.0，识别全程本机、不联网，
-  除 `RECORD_AUDIO` 外不申请额外权限
+- **不再打包离线语音模型**：`assets/model-cn`（Vosk 中文小模型，约 66MB）与 `vosk-android` 依赖已删除，
+  APK 体积从约 87MB 回落到约 29MB，安装后会释放原先解压到 `files/vosk-cn` 的空间
 - AGP 9.1 内置 Kotlin，构建脚本不单独应用 `org.jetbrains.kotlin.android`
 - 相机拍照经 FileProvider（`cache/camera/`）接收，落库前删除临时文件
 - 图片压缩：等比缩放至最长边 1280，JPEG 质量 85

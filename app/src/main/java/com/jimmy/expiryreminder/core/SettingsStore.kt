@@ -64,10 +64,6 @@ class SettingsStore private constructor() {
     private val _autoSyncEnabled = MutableStateFlow(false)
     val autoSyncEnabled: StateFlow<Boolean> get() = _autoSyncEnabled
 
-    /** 预测性返回动画：关闭后走普通返回，不做跟手缩放。 */
-    private val _predictiveBackEnabled = MutableStateFlow(true)
-    val predictiveBackEnabled: StateFlow<Boolean> get() = _predictiveBackEnabled
-
     /** 流体云 / Live Update 提醒：仅 Android 16+ 且有系统支持时生效，否则自动降级。 */
     private val _liveUpdateEnabled = MutableStateFlow(true)
     val liveUpdateEnabled: StateFlow<Boolean> get() = _liveUpdateEnabled
@@ -75,6 +71,13 @@ class SettingsStore private constructor() {
     /** 开机后是否恢复 30 分钟一次的自动同步排程。 */
     private val _autoSyncOnBoot = MutableStateFlow(true)
     val autoSyncOnBoot: StateFlow<Boolean> get() = _autoSyncOnBoot
+
+    /**
+     * 锁屏 / 通知栏隐藏物品详情。开启后锁屏只显示「到期提醒 · 点击查看」，
+     * 解锁后才看得到具体物品名——避免手机放在桌上时旁人一眼扫到家里买了什么。
+     */
+    private val _hideNotificationDetail = MutableStateFlow(false)
+    val hideNotificationDetail: StateFlow<Boolean> get() = _hideNotificationDetail
 
     fun load(context: Context) {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -97,14 +100,14 @@ class SettingsStore private constructor() {
             if (map.has("autoSyncEnabled") && !map.isNull("autoSyncEnabled")) {
                 _autoSyncEnabled.value = map.optBoolean("autoSyncEnabled", false)
             }
-            if (map.has("predictiveBackEnabled") && !map.isNull("predictiveBackEnabled")) {
-                _predictiveBackEnabled.value = map.optBoolean("predictiveBackEnabled", true)
-            }
             if (map.has("liveUpdateEnabled") && !map.isNull("liveUpdateEnabled")) {
                 _liveUpdateEnabled.value = map.optBoolean("liveUpdateEnabled", true)
             }
             if (map.has("autoSyncOnBoot") && !map.isNull("autoSyncOnBoot")) {
                 _autoSyncOnBoot.value = map.optBoolean("autoSyncOnBoot", true)
+            }
+            if (map.has("hideNotificationDetail") && !map.isNull("hideNotificationDetail")) {
+                _hideNotificationDetail.value = map.optBoolean("hideNotificationDetail", false)
             }
             // 旧版本没有统计卡配置：保持默认，不写回
             val cards = map.optJSONArray("statCards")
@@ -128,9 +131,9 @@ class SettingsStore private constructor() {
         useAlarmClock: Boolean? = null,
         statCards: List<StatCard>? = null,
         autoSyncEnabled: Boolean? = null,
-        predictiveBackEnabled: Boolean? = null,
         liveUpdateEnabled: Boolean? = null,
         autoSyncOnBoot: Boolean? = null,
+        hideNotificationDetail: Boolean? = null,
     ) {
         if (themeMode != null) _themeMode.value = themeMode
         if (notifyEnabled != null) _notifyEnabled.value = notifyEnabled
@@ -138,24 +141,24 @@ class SettingsStore private constructor() {
         if (useAlarmClock != null) _useAlarmClock.value = useAlarmClock
         if (statCards != null) _statCards.value = StatCard.normalize(statCards.map { it.key })
         if (autoSyncEnabled != null) _autoSyncEnabled.value = autoSyncEnabled
-        if (predictiveBackEnabled != null) _predictiveBackEnabled.value = predictiveBackEnabled
         if (liveUpdateEnabled != null) _liveUpdateEnabled.value = liveUpdateEnabled
         if (autoSyncOnBoot != null) _autoSyncOnBoot.value = autoSyncOnBoot
+        if (hideNotificationDetail != null) _hideNotificationDetail.value = hideNotificationDetail
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
             .putString(
                 KEY_SETTINGS,
                 JSONObject()
-                    .put("version", 6)
+                    .put("version", 7)
                     .put("theme", _themeMode.value.name)
                     .put("notifyEnabled", _notifyEnabled.value)
                     .put("notifyTime", _notifyTime.value)
                     .put("useAlarmClock", _useAlarmClock.value)
                     .put("statCards", JSONArray(_statCards.value.map { it.key }))
                     .put("autoSyncEnabled", _autoSyncEnabled.value)
-                    .put("predictiveBackEnabled", _predictiveBackEnabled.value)
                     .put("liveUpdateEnabled", _liveUpdateEnabled.value)
                     .put("autoSyncOnBoot", _autoSyncOnBoot.value)
+                    .put("hideNotificationDetail", _hideNotificationDetail.value)
                     .toString(),
             )
             .apply()

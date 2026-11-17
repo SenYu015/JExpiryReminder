@@ -44,6 +44,13 @@ object WidgetTheme {
         )
     }
 
+    /** 相机键圆形底：浅色主题淡主色，深色主题低亮度主色。 */
+    fun camBg(dark: Boolean): Int =
+        if (dark) R.drawable.widget_cam_bg_dark else R.drawable.widget_cam_bg_light
+
+    /** 相机键图标色：与底色同色系，保证两种主题下都有足够对比度。 */
+    fun camIcon(dark: Boolean): Int = if (dark) 0xFFEBB563.toInt() else 0xFFC07A15.toInt()
+
     /** 行底色按到期状态取；深色模式用低亮度版本，避免白块刺眼。 */
     fun rowBg(status: ExpiryStatus, dark: Boolean): Int = if (dark) {
         when (status) {

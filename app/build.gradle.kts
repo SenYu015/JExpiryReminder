@@ -25,10 +25,10 @@ android {
         targetSdk = 36
         // versionName 由 release-please 自动维护（generic extra-file 只替换标记之间的版本号）；
         // versionCode 从 versionName 推导（1.2.29 -> 10229），保证每次发版递增
-        // 本地分支 1.26.0：流体云诊断、保存动画收敛、主页按参考图重做视觉外壳；
+        // 本地分支 1.27.0：移除语音输入与内置 Vosk 离线模型（APK 回落约 66MB）；
         // 上游 release-please 下次发版会覆盖下面标记之间的值。
         // x-release-please-start-version
-        versionName = "1.26.0"
+        versionName = "1.27.26"
         // x-release-please-end
         val (major, minor, patch) = versionName!!.split(".").map { it.toInt() }
         versionCode = major * 10000 + minor * 100 + patch
@@ -99,10 +99,6 @@ dependencies {
     // 不可换成 com.google.android.gms:play-services-mlkit-text-recognition-chinese —
     // 那个版本依赖 Google Play 服务、首次需联网下载模型，国产 ROM 多数不可用。
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
-
-    // 离线语音：ColorOS 未向第三方开放 RecognitionService，内置 Vosk + 中文小模型，
-    // 模型在 assets/model-cn，运行期完全本机、不联网（APK 会增大约 50MB）。
-    implementation("com.alphacephei:vosk-android:0.3.47")
 
     testImplementation("junit:junit:4.13.2")
     // 单测里用真实的 org.json 实现（Android SDK 里的版本不 support JVM 单测）

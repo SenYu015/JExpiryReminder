@@ -17,10 +17,12 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.jimmy.expiryreminder.MainActivity
+import com.jimmy.expiryreminder.R
 import com.jimmy.expiryreminder.core.Dates
 import com.jimmy.expiryreminder.core.ExpiryCalc
 import com.jimmy.expiryreminder.core.ExpiryItem
 import com.jimmy.expiryreminder.core.ExpiryStore
+import com.jimmy.expiryreminder.core.SettingsStore
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDateTime
@@ -136,7 +138,8 @@ object ReminderService {
             else -> "还有 $days 天到期"
         }
         val count = if (item.quantity > 1) "（${item.quantity} 件）" else ""
-        return "${item.name} $when_$count"
+        val prefix = if (item.repeatEnabled) "循环任务「${item.name}」本周期" else item.name
+        return "$prefix $when_$count"
     }
 
     /** 计算未来一段时间内所有需要系统提醒的计划。
@@ -372,7 +375,7 @@ object ReminderService {
     fun showNotification(context: Context, id: Int, title: String, body: String) {
         if (!hasNotificationPermission(context)) return
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(id, NotificationCompat.Builder(context, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(com.jimmy.expiryreminder.R.drawable.ic_stat_alarm)
             .setContentTitle(title)
             .setContentText(body)
@@ -380,9 +383,26 @@ object ReminderService {
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_REMINDER)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .build())
+        // 锁屏可见性：默认公开（解锁桌面之外也能一眼看到哪件快过期）；
+        // 开启「锁屏隐藏详情」后只给系统一条脱敏公开版，具体物品名留在解锁后
+        if (SettingsStore.get().hideNotificationDetail.value) {
+            builder.setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+                .setPublicVersion(redactedNotification(context))
+        } else {
+            builder.setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+        }
+        manager.notify(id, builder.build())
     }
+
+    /** 锁屏上代替真实内容的那条：不含物品名、数量、备注与任何可推断信息。 */
+    private fun redactedNotification(context: Context): Notification =
+        NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_stat_alarm)
+            .setContentTitle("到期提醒")
+            .setContentText("点击查看详情")
+            .setContentIntent(launchAppPendingIntent(context))
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
 
     /** 只重发流体云汇总，不重排闹钟；设置页「重新发布」用这个，避免无谓地清建全部闹钟。 */
     fun repostLiveSummary(context: Context, store: ExpiryStore, enabled: Boolean) {
@@ -394,11 +414,58 @@ object ReminderService {
             if (item.archived || !Dates.isValidISODate(item.expireAt)) null
             else Dates.daysUntil(item.expireAt)?.takeIf { it in 0..7 }?.let { item to it }
         }.sortedBy { it.second }
-        if (soon.isEmpty()) cancelLiveSummary(context)
-        else showLiveSummary(
-            context,
-            soon.size,
-            soon.take(3).joinToString("；") { describe(it.first, it.second) },
+        if (soon.isEmpty()) {
+            cancelLiveSummary(context)
+            return
+        }
+        val content = liveSummaryContent(soon)
+        showLiveSummary(context, content)
+    }
+
+    /**
+     * 流体云卡片的内容编排。
+     *
+     * 注意：不能再用自定义 RemoteViews 摆三栏——平台 `hasPromotableCharacteristics()`
+     * 要求 `!containsCustomViews()`（见 Notification.java:3419），一旦设了
+     * setCustomContentView 就永久失去 FLAG_PROMOTED_ONGOING，流体云直接退化成普通通知。
+     * 所以布局交给系统模板，动效只能用系统支持的样式（这里用 ProgressStyle）。
+     *
+     * - [count]       7 天内到期件数；
+     * - [days]        最近一件的剩余天数，同时驱动进度条与胶囊文案；
+     * - [title]       主标题 = 物品名 + 到期状态（主体）；
+     * - [subtitle]    副标题 = 其余物品摘要，单行省略；
+     * - [capsuleText] 流体云胶囊文本。
+     */
+    data class LiveSummary(
+        val count: Int,
+        val days: Int,
+        val title: String,
+        val subtitle: String,
+        val capsuleText: String,
+    )
+
+    /** 剩余天数的最简表述：今天 / 明天 / N 天。 */
+    internal fun daysLabel(days: Int): String = when (days) {
+        0 -> "今天"
+        1 -> "明天"
+        else -> "$days 天"
+    }
+
+    internal fun liveSummaryContent(soon: List<Pair<ExpiryItem, Int>>): LiveSummary {
+        val (nearest, days) = soon.first()
+        val next = soon.getOrNull(1)
+        val subtitle = when {
+            next == null -> "共 1 件物品，请及时处理"
+            soon.size == 2 -> "另有 1 件：${next.first.name} ${daysLabel(next.second)}"
+            else -> "另有 ${soon.size - 1} 件 · ${next.first.name} ${daysLabel(next.second)}"
+        }
+        return LiveSummary(
+            count = soon.size,
+            days = days,
+            title = describe(nearest, days),
+            subtitle = subtitle,
+            // 胶囊宽度由这段文本决定：越短胶囊越窄，用最简表述
+            capsuleText = daysLabel(days),
         )
     }
 
@@ -447,28 +514,42 @@ object ReminderService {
     /**
      * 流体云 / Live Update 汇总：7 天内的到期物品合成一条常驻通知。
      *
+     * **禁止使用自定义 RemoteViews**：平台 `hasPromotableCharacteristics()`
+     * 要求 `!containsCustomViews()`（Notification.java:3419），只要设了
+     * setCustomContentView / setCustomBigContentView 就永久失去 FLAG_PROMOTED_ONGOING，
+     * 流体云退化为普通通知。DecoratedCustomViewStyle 也救不回来（不在
+     * hasPromotableStyle 白名单内，且 containsCustomViews 仍为 true）。
+     *
+     * 布局交给系统模板，动效交给系统：[ProgressStyle] 是官方可提升样式，
+     * 以 7 天窗口的「已消耗进度」呈现紧迫度，系统在数值变化时做平滑动画。
+     *
+     * 不放操作按钮：卡片本身单击即进应用，多一个按钮只会挤占内容宽度。
+     *
      * ColorOS 16 起流体云对接原生 Android 16 Live Updates API。真机排查发现：
      * CATEGORY_REMINDER + 默认 PRIVATE 可见性只会被记录为「请求提升」，不会得到
      * FLAG_PROMOTED_ONGOING；改用 CATEGORY_STATUS + VISIBILITY_PUBLIC + 非彩色化后，
      * 真机已出现 PROMOTED_ONGOING。低版本或用户关闭实时动态时自动降级为普通通知。
      */
-    fun showLiveSummary(context: Context, count: Int, body: String) {
+    fun showLiveSummary(context: Context, summary: LiveSummary) {
         if (!hasNotificationPermission(context)) return
-        if (count <= 0) {
+        if (summary.count <= 0) {
             cancelLiveSummary(context)
             return
         }
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val title = "有 $count 件物品即将到期"
+        // 流体云会展示在锁屏与状态栏：开启隐藏详情时只留「N 件即将到期」，
+        // 物品名不外露；胶囊文本本身只有天数，可以保留
+        val hideDetail = SettingsStore.get().hideNotificationDetail.value
+        val title = if (hideDetail) "${summary.count} 件物品即将到期" else summary.title
+        val subtitle = if (hideDetail) "点击查看清单" else summary.subtitle
         if (Build.VERSION.SDK_INT >= 36) {
-            val short = if (count > 99) "99+ 件" else "$count 件"
             // androidx.core 1.17 已封装 36.1 的 promoted ongoing：内部写的就是平台 extras，
             // 比直接调平台类型化 setter 更稳（compileSdk 36 上平台方法不可见）。
             val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-                .setSmallIcon(com.jimmy.expiryreminder.R.drawable.ic_stat_alarm)
+                .setSmallIcon(R.drawable.ic_stat_alarm)
                 .setContentTitle(title)
-                .setContentText(body)
-                .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+                .setContentText(subtitle)
+                .setStyle(buildProgressStyle(summary))
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
                 .setPriority(NotificationCompat.PRIORITY_MAX)
@@ -478,14 +559,89 @@ object ReminderService {
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setColorized(false)
                 .setContentIntent(launchAppPendingIntent(context))
-                .setShortCriticalText(short)
+                .setShortCriticalText(summary.capsuleText)
                 .setRequestPromotedOngoing(true)
                 .build()
             runCatching { manager.notify(LIVE_SUMMARY_ID, notification) }
-                .onFailure { showNotification(context, LIVE_SUMMARY_ID, title, body) }
+                .onFailure { showNotification(context, LIVE_SUMMARY_ID, title, subtitle) }
         } else {
-            showNotification(context, LIVE_SUMMARY_ID, title, body)
+            val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_stat_alarm)
+                .setContentTitle(title)
+                .setContentText(subtitle)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setPriority(NotificationCompat.PRIORITY_MAX)
+                .setCategory(NotificationCompat.CATEGORY_STATUS)
+                .setContentIntent(launchAppPendingIntent(context))
+                .build()
+            runCatching { manager.notify(LIVE_SUMMARY_ID, notification) }
+                .onFailure { showNotification(context, LIVE_SUMMARY_ID, title, subtitle) }
         }
+    }
+
+    /** 进度窗口：流体云只统计 7 天内到期的物品，进度条也按这个窗口算。 */
+    private const val LIVE_WINDOW_DAYS = 7
+
+    /** 进度单位：1 天 = 10 个单位。 */
+    private const val UNITS_PER_DAY = 10
+
+    /** 紧迫度锚点配色（与 App 内红/琥珀语义一致）。 */
+    private const val COLOR_SAFE = 0xFF67C23A.toInt()   // 7 天：安全
+    private const val COLOR_SOON = 0xFFE6A23C.toInt()   // 3 天：临近
+    private const val COLOR_URGENT = 0xFFF56C6C.toInt() // 0 天：紧急
+
+    /**
+     * 系统进度样式：单段连续条，按 7 天窗口已消耗比例填充，颜色随剩余天数连续插值。
+     *
+     * **为什么不用多段做渐变**：系统把每个 [NotificationCompat.ProgressStyle.Segment]
+     * 画成独立的圆角短条，段之间实测有 8px 硬断口（1440 宽屏像素测量），
+     * 切成 10 段只会得到 10 个断开的色块。所以走单段：线是完整一条，
+     * 颜色按 绿 → 琥珀 → 红 线性插值，随剩余天数平滑过渡。
+     *
+     * `setStyledByProgress(true)`（官方默认）让系统把已走过部分渲染成实色、
+     * 未到部分淡化；ProgressStyle 属于 hasPromotableStyle 白名单，不影响流体云提升。
+     */
+    private fun buildProgressStyle(summary: LiveSummary): NotificationCompat.ProgressStyle {
+        val elapsed = (LIVE_WINDOW_DAYS - summary.days).coerceIn(0, LIVE_WINDOW_DAYS)
+        return NotificationCompat.ProgressStyle()
+            .addProgressSegment(
+                NotificationCompat.ProgressStyle.Segment(LIVE_WINDOW_DAYS * UNITS_PER_DAY)
+                    .setColor(urgencyColor(summary.days))
+            )
+            .setProgress(elapsed * UNITS_PER_DAY)
+            .setStyledByProgress(true)
+    }
+
+    /**
+     * 剩余天数 → 进度条颜色，线性插值：
+     * 7 天绿 → 3 天琥珀 → 0 天红。中间值连续过渡，不会出现跳色。
+     */
+    internal fun urgencyColor(days: Int): Int {
+        val d = days.coerceIn(0, LIVE_WINDOW_DAYS)
+        return when {
+            d >= SOON_ANCHOR_DAYS -> {
+                val f = (LIVE_WINDOW_DAYS - d).toFloat() / (LIVE_WINDOW_DAYS - SOON_ANCHOR_DAYS)
+                lerpColor(COLOR_SAFE, COLOR_SOON, f)
+            }
+            else -> {
+                val f = (SOON_ANCHOR_DAYS - d).toFloat() / SOON_ANCHOR_DAYS
+                lerpColor(COLOR_SOON, COLOR_URGENT, f)
+            }
+        }
+    }
+
+    /** 琥珀锚点：剩 3 天开始从安全绿转向警示色。 */
+    private const val SOON_ANCHOR_DAYS = 3
+
+    private fun lerpColor(from: Int, to: Int, fraction: Float): Int {
+        val f = fraction.coerceIn(0f, 1f)
+        fun channel(shift: Int): Int {
+            val a = (from shr shift) and 0xFF
+            val b = (to shr shift) and 0xFF
+            return (a + (b - a) * f).toInt().coerceIn(0, 255)
+        }
+        return (0xFF shl 24) or (channel(16) shl 16) or (channel(8) shl 8) or channel(0)
     }
 
     fun cancelLiveSummary(context: Context) {

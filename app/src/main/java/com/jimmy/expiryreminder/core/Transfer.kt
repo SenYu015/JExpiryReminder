@@ -27,6 +27,9 @@ object TransferPayload {
     /** 发送方预览里最多列几件物品名称。 */
     const val PREVIEW_NAMES = 3
 
+    /** 单个包最多带多少件物品；超出视为异常包，直接拒收。 */
+    const val MAX_ITEMS = 5_000
+
     data class Batch(val sender: String, val sentAt: String, val items: List<ExpiryItem>)
 
     /** 同名冲突：本地已有同名物品时，每件收到的物品怎么处理。 */
@@ -116,14 +119,21 @@ object TransferPayload {
     /** 只读 zip 里的 manifest；格式不对（不是本应用的物品包）返回 null。 */
     fun readManifest(file: File): Batch? {
         ZipInputStream(file.inputStream().buffered()).use { zip ->
+            var scanned = 0
             while (true) {
                 val entry = zip.nextEntry ?: break
+                if (++scanned > IoLimits.MAX_TRANSFER_ENTRIES) return null
                 if (entry.name == "manifest.json") {
+                    val raw = runCatching {
+                        IoLimits.readLimited(zip, IoLimits.MAX_MANIFEST)
+                    }.getOrNull() ?: return null
                     val json = runCatching {
-                        JSONObject(zip.readBytes().toString(Charsets.UTF_8))
+                        JSONObject(raw.toString(Charsets.UTF_8))
                     }.getOrNull() ?: return null
                     if (json.optString("app") != APP) return null
                     val arr = json.optJSONArray("items") ?: return null
+                    // 物品数组也要有上限：一条巨型 manifest 足以把解析与合并拖死
+                    if (arr.length() > MAX_ITEMS) return null
                     val items = (0 until arr.length()).mapNotNull { ExpiryItem.fromJson(arr.opt(it)) }
                     return Batch(
                         sender = json.optStringOrNull("sender")?.takeIf { it.isNotBlank() } ?: "另一台设备",
@@ -171,15 +181,26 @@ object TransferPayload {
     /** 把 zip 里的图片条目解到 [dir]，返回「zip 内路径 → 临时文件」。 */
     fun extractImages(zip: File, dir: File): Map<String, File> {
         val extracted = HashMap<String, File>()
+        var total = 0L
+        var entries = 0
         ZipInputStream(zip.inputStream().buffered()).use { zis ->
             while (true) {
                 val entry = zis.nextEntry ?: break
                 if (!entry.isDirectory) {
+                    if (++entries > IoLimits.MAX_TRANSFER_ENTRIES) {
+                        throw IoLimits.TooLargeException("物品包内文件数量过多")
+                    }
                     val path = normalizeImagePath(entry.name)
                     if (path.isNotEmpty()) {
+                        // 包大小只限制了压缩后体积，解压后仍可能被放大，必须逐条与累计双重限流
+                        val bytes = IoLimits.readLimited(zis, IoLimits.MAX_IMAGE_ENTRY)
+                        total += bytes.size
+                        if (total > IoLimits.MAX_IMAGE_TOTAL) {
+                            throw IoLimits.TooLargeException("物品包解压后超出大小上限")
+                        }
                         // 同一个条目可能被多条物品引用，按路径缓存，避免重复读 zip
                         val out = File(dir, path.replace('/', '_'))
-                        out.writeBytes(zis.readBytes())
+                        out.writeBytes(bytes)
                         extracted[path] = out
                     }
                 }

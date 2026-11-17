@@ -27,10 +27,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -46,8 +49,6 @@ import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -56,7 +57,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarDuration
@@ -69,6 +69,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -82,16 +83,19 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -102,7 +106,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.zIndex
-import com.jimmy.expiryreminder.R
 import com.jimmy.expiryreminder.core.Categories
 import com.jimmy.expiryreminder.core.Dates
 import com.jimmy.expiryreminder.core.ExpiryCalc
@@ -122,7 +125,6 @@ import com.jimmy.expiryreminder.ocr.PrefillDraft
 import com.jimmy.expiryreminder.ocr.ResultMerger
 import com.jimmy.expiryreminder.ocr.ShelfLifeCandidate
 import com.jimmy.expiryreminder.core.ShelfLifeUnit
-import com.jimmy.expiryreminder.core.VoiceText
 import com.jimmy.expiryreminder.core.label
 import com.jimmy.expiryreminder.core.normalizeImagePath
 import com.jimmy.expiryreminder.core.normalizeRemindDays
@@ -135,6 +137,12 @@ import java.io.File
 import java.time.LocalDate
 
 private const val MAX_NOTE = 200
+
+/** 编辑页图片查看器的入参：[origin] 是发起点击的缩略图屏幕位置，用于展开/缩回转场。 */
+private data class EditViewerState(
+    val index: Int,
+    val origin: ImageOrigin?,
+)
 
 /** 参考稿样式编辑页：单张白色大卡 + 嵌套有效期分组 + 底部通栏保存。 */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -191,10 +199,12 @@ fun EditScreen(
         mutableStateOf(existing?.shelfLifeUnit ?: prefill?.shelfLifeUnit ?: ShelfLifeUnit.month)
     }
     var expireAt by remember { mutableStateOf(existing?.expireAt ?: prefill?.expireAt ?: "") }
+    // 循环任务的到期日始终由「上次完成日 + 周期」推导，不允许停留在手动指定的旧日期
+    var repeatEnabled by remember { mutableStateOf(existing?.repeatEnabled ?: false) }
     var manualExpire by remember {
         mutableStateOf(
             if (existing != null) {
-                existing.expireAt.isNotEmpty() &&
+                !existing.repeatEnabled && existing.expireAt.isNotEmpty() &&
                     ExpiryCalc.computeExpireAt(
                         existing.productionDate, existing.shelfLife, existing.shelfLifeUnit,
                     ) != existing.expireAt
@@ -215,8 +225,12 @@ fun EditScreen(
     var confirmDelete by remember { mutableStateOf(false) }
     // 自定义提前天数的弹窗开关
     var customDayDialog by remember { mutableStateOf(false) }
-    // 正在查看的图片下标：null = 查看器未打开
-    var viewerIndex by remember { mutableStateOf<Int?>(null) }
+    // 正在查看的图片：下标 + 发起点击的缩略图位置（用于展开/缩回转场）；null = 查看器未打开
+    var viewerState by remember { mutableStateOf<EditViewerState?>(null) }
+    // 每张缩略图在屏幕上的位置，布局时记录，点击看大图时取用。
+    // 圆角与缩略图一致（12dp），缩回终点才不会形状突变。
+    val thumbRadiusPx = with(LocalDensity.current) { 12.dp.toPx() }
+    val thumbOrigins = remember { mutableStateMapOf<Int, ImageOrigin>() }
 
     // ---------------------------------------------- 相似物品（防重复录入）
     // 只在新增模式检索：编辑已有物品时改名撞到别人，不算「重复录入」，不该打扰。
@@ -263,50 +277,20 @@ fun EditScreen(
     fun showInfo(msg: String) = showMessage(msg, isError = false)
     val scrollState = rememberScrollState()
 
-    // 本机语音：优先 Android 端侧识别（createOnDeviceSpeechRecognizer），
-    // 没有端侧引擎时用系统识别器 + 离线偏好；两条路径都需要 RECORD_AUDIO。
-    val voiceCanUse = remember { VoiceInput.canUse(context) }
-    var voiceDialogTarget by remember { mutableStateOf<String?>(null) } // name / note / quick
-    var pendingVoiceTarget by remember { mutableStateOf("name") }
-    val recordAudioPermission = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        if (granted) voiceDialogTarget = pendingVoiceTarget
-        else showError("需要麦克风权限才能语音输入")
-    }
-    fun startVoice(target: String) {
-        if (!voiceCanUse) {
-            showError("本机没有可用的语音引擎，可到系统设置下载离线语音包")
-            return
-        }
-        pendingVoiceTarget = target
-        val granted = androidx.core.content.ContextCompat.checkSelfPermission(
-            context, android.Manifest.permission.RECORD_AUDIO,
-        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-        if (granted) voiceDialogTarget = target
-        else recordAudioPermission.launch(android.Manifest.permission.RECORD_AUDIO)
-    }
-    fun applySpoken(spoken: String) {
-        when (voiceDialogTarget) {
-            "name" -> {
-                name = spoken.take(60)
-                nameFromOcr = false
-            }
-            "note" -> note = (if (note.isBlank()) spoken else "$note $spoken").take(MAX_NOTE)
-            "quick" -> {
-                val quick = VoiceText.parseQuickRecord(spoken)
-                if (quick.name.isNotBlank()) {
-                    name = quick.name
-                    nameFromOcr = false
-                }
-                if (quick.expireAt.isNotBlank()) {
-                    expireAt = quick.expireAt
-                    manualExpire = true
-                    expireFromOcr = false
-                }
-                if (quick.note.isNotBlank()) note = quick.note.take(MAX_NOTE)
-                showInfo("已按「$spoken」生成草稿，请核对后保存")
-            }
+    // 备注框是多行且靠下：输入法弹出时 imePadding 只收缩布局，不会自动把焦点框滚进视口，
+    // 这里在它获焦后主动滚一次，避免光标落在备注上却被键盘盖住。
+    var noteFocused by remember { mutableStateOf(false) }
+    val noteBringIntoView = remember { BringIntoViewRequester() }
+    val density = LocalDensity.current
+    LaunchedEffect(noteFocused) {
+        if (noteFocused) {
+            delay(220) // 等输入法弹出、布局稳定后再滚，否则滚早了会被随后重排抵消
+            noteBringIntoView.bringIntoView()
+            // bringIntoView 只滚到视口底缘，而底部悬浮的保存栏会盖住备注框下半截，
+            // 再往下补一段让整个备注框落在保存栏上方。
+            scrollState.animateScrollTo(
+                scrollState.value + with(density) { 88.dp.toPx() }.toInt()
+            )
         }
     }
 
@@ -354,6 +338,34 @@ fun EditScreen(
         val uri = androidx.core.content.FileProvider.getUriForFile(context, authority, file)
         takePicture.launch(uri)
     }
+
+    // 备注取字：拍照 → 落盘成临时图（不进物品图集）→ 圈选/整图识别 → 回填备注
+    var noteCameraTarget by remember { mutableStateOf<File?>(null) }
+    var noteOcrPath by remember { mutableStateOf<String?>(null) }
+    val noteTakePicture = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
+        val file = noteCameraTarget
+        if (ok && file != null && file.exists()) {
+            scope.launch(Dispatchers.IO) {
+                val path = runCatching {
+                    ImageStore.saveCompressedImage(context, file.readBytes(), "note_${uid()}")
+                }.getOrNull()
+                withContext(Dispatchers.Main) {
+                    if (path != null) noteOcrPath = path else showError("拍照失败，请重试")
+                }
+                runCatching { file.delete() }
+            }
+        }
+        noteCameraTarget = null
+    }
+    fun launchNoteCamera() {
+        val dir = File(context.cacheDir, "camera").apply { mkdirs() }
+        val file = File(dir, "note_${System.currentTimeMillis()}.jpg")
+        noteCameraTarget = file
+        val authority = "${context.packageName}.fileprovider"
+        val uri = androidx.core.content.FileProvider.getUriForFile(context, authority, file)
+        noteTakePicture.launch(uri)
+    }
+
     val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         if (uri != null && images.size < MAX_IMAGES) {
             scope.launch(Dispatchers.IO) {
@@ -386,12 +398,13 @@ fun EditScreen(
     var unitMenu by remember { mutableStateOf(false) }
     var spaceMenu by remember { mutableStateOf(false) }
 
-    // 图片：拖动排序 / 重新识别（都由按钮触发）
+    // 图片：拖动排序 / 重新识别 / 圈选识别（都由按钮触发）
     var sortDialog by remember { mutableStateOf(false) }
     var reOcrDialog by remember { mutableStateOf(false) }
     var reOcrRunning by remember { mutableStateOf(false) }
     var reOcrDone by remember { mutableStateOf(0) }
     var reOcrTotal by remember { mutableStateOf(0) }
+    var cropOcrOpen by remember { mutableStateOf(false) }
 
     /**
      * 重新识别选中的图片。
@@ -477,41 +490,84 @@ fun EditScreen(
         }
     }
 
+    // 保存：校验 -> 组装 -> 入库；提示走底部 Snackbar，同时把视线滚回顶部
+    fun save() {
+        val finalName = name.trim()
+        if (finalName.isEmpty()) {
+            showError("请填写物品名称")
+            scope.launch { scrollState.animateScrollTo(0) }
+            return
+        }
+        val amount = shelfLifeText.toIntOrNull() ?: 0
+        if (repeatEnabled) {
+            if (!Dates.isValidISODate(productionDate)) {
+                showError("请选择上次完成日期")
+                scope.launch { scrollState.animateScrollTo(0) }
+                return
+            }
+            if (amount <= 0) {
+                showError("请填写循环周期")
+                scope.launch { scrollState.animateScrollTo(0) }
+                return
+            }
+            // 循环任务的到期日只认「上次完成日 + 周期」，忽略任何可能残留的手动日期
+            expireAt = ExpiryCalc.computeExpireAt(productionDate, amount, unit)
+        }
+        if (expireAt.isEmpty()) {
+            showError("请填写到期日期（生产日期 + 有效期，或手动指定）")
+            scope.launch { scrollState.animateScrollTo(0) }
+            return
+        }
+        if (!Dates.isValidISODate(expireAt)) {
+            showError("到期日期格式不正确")
+            return
+        }
+        val draft = ExpiryItem(
+            id = existing?.id ?: "",
+            name = finalName,
+            category = category,
+            productionDate = productionDate,
+            shelfLife = amount,
+            shelfLifeUnit = unit,
+            expireAt = expireAt,
+            remindDays = remindDays,
+            quantity = quantity.coerceIn(1, MAX_QUANTITY),
+            note = note.trim(),
+            images = images,
+            notifiedKeys = existing?.notifiedKeys ?: emptyList(),
+            archived = existing?.archived ?: false,
+            createdAt = existing?.createdAt ?: Dates.nowIsoTimestamp(),
+            updatedAt = Dates.nowIsoTimestamp(),
+            spaceId = store.resolveSpaceId(spaceId),
+            repeatEnabled = repeatEnabled,
+        )
+        scope.launch {
+            if (existing == null) store.createItem(context, draft)
+            else store.updateItem(context, existing.id, draft)
+            finish()
+        }
+    }
+
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().imePadding()) {
-            // 紧凑头部（替代 TopAppBar 的 64dp，压到 48dp）
-            // 头部与页面底色一致，状态栏区域无缝衔接
+            // 紧凑头部：单行标题，副标题说明去掉，把纵向空间全部让给表单
             Surface(color = MaterialTheme.colorScheme.background) {
                 Row(
                     Modifier
                         .fillMaxWidth()
                         .statusBarsPadding()
-                        .padding(start = 8.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+                        .padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     IconButton(onClick = onDone, modifier = Modifier.size(40.dp)) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            if (existing == null) "新增物品" else "编辑物品",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold,
-                        )
-                        Text(
-                            "食品、药品、证件的有效期管理",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    // 新增时把「语音快速录入」放在标题栏，避免和名称框的麦克风挤在一起
-                    if (existing == null) {
-                        MicIconButton(
-                            onClick = { startVoice("quick") },
-                            enabled = voiceCanUse,
-                            description = "语音快速录入",
-                        )
-                    }
+                    Text(
+                        if (existing == null) "新增物品" else "编辑物品",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f),
+                    )
                     if (existing != null) {
                         IconButton(onClick = { confirmDelete = true }, modifier = Modifier.size(40.dp)) {
                             Icon(Icons.Filled.Close, contentDescription = "删除", tint = MaterialTheme.colorScheme.error)
@@ -520,11 +576,13 @@ fun EditScreen(
                 }
             }
 
+            Box(Modifier.weight(1f)) {
             Column(
                 Modifier
-                    .weight(1f)
+                    .fillMaxSize()
                     .verticalScroll(scrollState)
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                    .padding(horizontal = 16.dp)
+                    .padding(top = 8.dp, bottom = 88.dp),
             ) {
                 // ============================================== 表单大卡（白底页面靠描边区分）
                 Column(
@@ -532,10 +590,9 @@ fun EditScreen(
                         .fillMaxWidth()
                         .widthIn(max = 640.dp)
                         .align(Alignment.CenterHorizontally),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     FormCard {
-                        EditSectionHeader("基本信息", "名称、空间与分类")
                         // -------------------------------------- 物品名称
                         // 标签行右侧挂相似物品徽标：输入框内右侧已被「清空 ×」占着，
                         // 两个小按钮并排容易误触，所以挪到框外标签行右端。
@@ -560,17 +617,10 @@ fun EditScreen(
                             value = name,
                             onValueChange = { name = it; nameFromOcr = false },
                             placeholder = "如：维生素 C、护照、牛奶",
-                            fixedHeight = 52.dp,
+                            fixedHeight = 44.dp,
                             modifier = Modifier.fillMaxWidth(),
                             focusRequester = nameFocus,
                             showClear = true,
-                            trailing = {
-                                MicIconButton(
-                                    onClick = { startVoice("name") },
-                                    enabled = voiceCanUse,
-                                    description = "语音输入名称",
-                                )
-                            },
                         )
 
                         // 识别原文：离线 OCR 不准时可逐行核对，点一行补进备注
@@ -763,12 +813,57 @@ fun EditScreen(
                                 },
                             )
                         }
-                    }
 
-                    FormCard {
-                        EditSectionHeader("日期与数量", "到期日期可由生产日期与有效期推算")
+                        // -------------------------------------- 循环任务开关
+                        // 充电 / 清理 / 添置这类物品到期只是「该做一次了」，完成后从完成日重新计时。
+                        fun toggleRepeat(next: Boolean) {
+                            repeatEnabled = next
+                            // 循环模式不允许停留在手动指定的到期日；关闭时保留当前日期作为手动值
+                            manualExpire = !next
+                            if (next) {
+                                if (!Dates.isValidISODate(productionDate)) {
+                                    productionDate = Dates.todayISO()
+                                }
+                                val amount = shelfLifeText.toIntOrNull() ?: 0
+                                if (amount <= 0) {
+                                    shelfLifeText = "30"
+                                    unit = ShelfLifeUnit.day
+                                }
+                                expireAt = ExpiryCalc.computeExpireAt(
+                                    productionDate, shelfLifeText.toIntOrNull() ?: 30, unit,
+                                )
+                            }
+                        }
+                        Surface(
+                            onClick = { toggleRepeat(!repeatEnabled) },
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Row(
+                                Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        "循环任务",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                    )
+                                    Text(
+                                        if (repeatEnabled) "完成本次后从完成日重新计时"
+                                        else "适用于定期充电、清理、添置等",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                AppSwitch(checked = repeatEnabled, onCheckedChange = { toggleRepeat(it) })
+                            }
+                        }
+                        Spacer(Modifier.height(8.dp))
 
-                        // -------------------------------------- 生产日期 / 有效期 / 单位
+                        // -------------------------------------- 上次完成日 / 周期 / 单位
+                        // 循环模式下复用这三个字段：上次完成日（productionDate）+ 周期（shelfLife + unit）
                         // 外层按左右两半分：生产日期占左半（与到期日期对齐），
                         // 右半内部再按 0.55:0.45 分给有效期与单位，保证有效期列与分类/数量列起始对齐
                         Row(
@@ -776,7 +871,11 @@ fun EditScreen(
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
                             Column(Modifier.weight(1f)) {
-                                FieldLabel("生产日期", optional = true, ocrBadge = productionFromOcr)
+                                FieldLabel(
+                                    if (repeatEnabled) "上次完成日" else "生产日期",
+                                    optional = true,
+                                    ocrBadge = productionFromOcr,
+                                )
                                 SelectBox(
                                     text = productionDate.ifEmpty { "选择日期" },
                                     onClick = {
@@ -794,7 +893,11 @@ fun EditScreen(
                                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 ) {
                                     Column(Modifier.weight(0.55f)) {
-                                        FieldLabel("有效期", optional = true, ocrBadge = shelfLifeFromOcr)
+                                        FieldLabel(
+                                            if (repeatEnabled) "周期" else "有效期",
+                                            optional = true,
+                                            ocrBadge = shelfLifeFromOcr,
+                                        )
                                         InputBox(
                                             value = shelfLifeText,
                                             onValueChange = {
@@ -802,7 +905,7 @@ fun EditScreen(
                                                 shelfLifeFromOcr = false
                                             },
                                             placeholder = "选填",
-                                            fixedHeight = 52.dp,
+                                            fixedHeight = 44.dp,
                                             modifier = Modifier.fillMaxWidth(),
                                             showClear = true,
                                             keyboardType = KeyboardType.Number,
@@ -846,24 +949,51 @@ fun EditScreen(
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
                             Column(Modifier.weight(1f)) {
-                                FieldLabel("到期日期", ocrBadge = expireFromOcr)
-                                SelectBox(
-                                    text = expireAt.ifEmpty { "选择日期" },
-                                    leading = {
-                                        Icon(
-                                            Icons.Filled.DateRange, contentDescription = null,
-                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.size(16.dp),
-                                        )
-                                    },
-                                    onClick = {
-                                        datePickerTarget = "expire"
-                                        pickerDate = runCatching { LocalDate.parse(expireAt) }
-                                            .getOrNull() ?: LocalDate.now()
-                                        showDatePicker = true
-                                    },
-                                    modifier = Modifier.fillMaxWidth(),
+                                FieldLabel(
+                                    if (repeatEnabled) "本周期到期" else "到期日期",
+                                    ocrBadge = expireFromOcr && !repeatEnabled,
                                 )
+                                if (repeatEnabled) {
+                                    // 循环到期日由「上次完成日 + 周期」推导，此处只读，避免手动改完与周期对不上
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                        modifier = Modifier.fillMaxWidth().height(44.dp),
+                                    ) {
+                                        Row(
+                                            Modifier.padding(horizontal = 12.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                        ) {
+                                            Text(
+                                                expireAt.ifEmpty { "请先填完成日和周期" },
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                color = if (expireAt.isEmpty()) {
+                                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                                } else MaterialTheme.colorScheme.onSurface,
+                                                maxLines = 1,
+                                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                            )
+                                        }
+                                    }
+                                } else {
+                                    SelectBox(
+                                        text = expireAt.ifEmpty { "选择日期" },
+                                        leading = {
+                                            Icon(
+                                                Icons.Filled.DateRange, contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.size(16.dp),
+                                            )
+                                        },
+                                        onClick = {
+                                            datePickerTarget = "expire"
+                                            pickerDate = runCatching { LocalDate.parse(expireAt) }
+                                                .getOrNull() ?: LocalDate.now()
+                                            showDatePicker = true
+                                        },
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                }
                             }
                             Column(Modifier.weight(1f)) {
                                 FieldLabel("数量")
@@ -874,36 +1004,36 @@ fun EditScreen(
                                 )
                             }
                         }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                when {
-                                    expireAt.isEmpty() -> "由生产日期与有效期推算，也可手动指定"
-                                    else -> Dates.describeRemaining(expireAt)
-                                },
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            if (manualExpire && productionDate.isNotEmpty() &&
-                                (shelfLifeText.toIntOrNull() ?: 0) > 0
-                            ) {
-                                Spacer(Modifier.weight(1f))
+                        // 剩余天数提示只在日期已填时出现；没填时这行纯属占位，删掉省一行
+                        if (expireAt.isNotEmpty()) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
-                                    "恢复自动推算",
+                                    if (repeatEnabled) "本周期${Dates.describeRemaining(expireAt)}"
+                                    else Dates.describeRemaining(expireAt),
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.clickable {
-                                        manualExpire = false
-                                        val amount = shelfLifeText.toIntOrNull() ?: 0
-                                        expireAt =
-                                            ExpiryCalc.computeExpireAt(productionDate, amount, unit)
-                                    },
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
+                                if (!repeatEnabled && manualExpire && productionDate.isNotEmpty() &&
+                                    (shelfLifeText.toIntOrNull() ?: 0) > 0
+                                ) {
+                                    Spacer(Modifier.weight(1f))
+                                    Text(
+                                        "恢复自动推算",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.clickable {
+                                            manualExpire = false
+                                            val amount = shelfLifeText.toIntOrNull() ?: 0
+                                            expireAt =
+                                                ExpiryCalc.computeExpireAt(productionDate, amount, unit)
+                                        },
+                                    )
+                                }
                             }
                         }
-                    }
 
-                    FormCard {
-                        EditSectionHeader("提醒与补充")
+                        // -------------------------------------------- 提醒与补充
+                        // 提前提醒
 
                         // -------------------------------------- 提前提醒
                         FieldLabel("提前提醒")
@@ -915,38 +1045,48 @@ fun EditScreen(
                                     if (day in remindDays) remindDays - day else remindDays + day
                             },
                             onCustom = { customDayDialog = true },
+                            chipHeight = 26.dp,
+                            compactLabel = true,
                         )
-                        if (remindDays.isEmpty()) {
+
+                        // -------------------------------------- 备注
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            FieldLabel("备注", optional = true)
+                            Spacer(Modifier.weight(1f))
                             Text(
-                                "未选择则不推送到期提醒",
-                                style = MaterialTheme.typography.bodySmall,
+                                "${note.length} / $MAX_NOTE",
+                                style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
-
-                        // -------------------------------------- 备注
-                        FieldLabel("备注", optional = true)
                         InputBox(
                             value = note,
                             onValueChange = { note = it.take(MAX_NOTE) },
                             placeholder = "存放位置、开封日期等",
-                            fixedHeight = 52.dp,
-                            modifier = Modifier.fillMaxWidth(),
+                            minLines = 3,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .bringIntoViewRequester(noteBringIntoView)
+                                .onFocusChanged { noteFocused = it.isFocused },
                             showClear = true,
                             trailing = {
-                                MicIconButton(
-                                    onClick = { startVoice("note") },
-                                    enabled = voiceCanUse,
-                                    description = "语音输入备注",
-                                )
+                                Box(
+                                    Modifier
+                                        .size(32.dp)
+                                        .clip(CircleShape)
+                                        .clickable { launchNoteCamera() },
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    CameraGlyph(
+                                        color = MaterialTheme.colorScheme.primary,
+                                        holeColor = MaterialTheme.colorScheme.surface,
+                                        modifier = Modifier.size(20.dp),
+                                    )
+                                }
                             },
-                        )
-                        Text(
-                            "${note.length} / $MAX_NOTE",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.End,
-                            modifier = Modifier.fillMaxWidth(),
                         )
 
                         // -------------------------------------- 图片
@@ -977,6 +1117,16 @@ fun EditScreen(
                                         .padding(horizontal = 6.dp, vertical = 6.dp),
                                 )
                                 Spacer(Modifier.width(4.dp))
+                                Text(
+                                    "圈选识别",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .clickable { cropOcrOpen = true }
+                                        .padding(horizontal = 6.dp, vertical = 6.dp),
+                                )
+                                Spacer(Modifier.width(4.dp))
                             }
                             Text(
                                 "${images.size} / $MAX_IMAGES",
@@ -988,7 +1138,7 @@ fun EditScreen(
                             // 虚线添加框
                             Box(
                                 Modifier
-                                    .size(76.dp)
+                                    .size(64.dp)
                                     .dashedBorder(
                                         color = MaterialTheme.colorScheme.outline,
                                         cornerRadius = 12.dp,
@@ -1002,9 +1152,9 @@ fun EditScreen(
                                         Icons.Filled.Add,
                                         contentDescription = null,
                                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(22.dp),
+                                        modifier = Modifier.size(20.dp),
                                     )
-                                    Spacer(Modifier.height(4.dp))
+                                    Spacer(Modifier.height(2.dp))
                                     Text(
                                         "添加",
                                         style = MaterialTheme.typography.labelSmall,
@@ -1031,17 +1181,29 @@ fun EditScreen(
                                 Box(
                                     Modifier
                                         .clip(RoundedCornerShape(12.dp))
-                                        .clickable { viewerIndex = imgIndex },
+                                        .onGloballyPositioned { coords ->
+                                            val pos = coords.positionInWindow()
+                                            thumbOrigins[imgIndex] = ImageOrigin(
+                                                x = pos.x,
+                                                y = pos.y,
+                                                width = coords.size.width.toFloat(),
+                                                height = coords.size.height.toFloat(),
+                                                cornerRadius = thumbRadiusPx,
+                                            )
+                                        }
+                                        .clickable {
+                                            viewerState = EditViewerState(imgIndex, thumbOrigins[imgIndex])
+                                        },
                                 ) {
                                     val file = rememberFileForPath(img.path)
                                     if (file != null) {
                                         DraftImage(
-                                            file = file, size = 76.dp,
+                                            file = file, size = 64.dp,
                                             modifier = Modifier.clip(RoundedCornerShape(12.dp)),
                                         )
                                     } else {
                                         Box(
-                                            Modifier.size(76.dp).clip(RoundedCornerShape(12.dp))
+                                            Modifier.size(64.dp).clip(RoundedCornerShape(12.dp))
                                                 .background(MaterialTheme.colorScheme.surfaceVariant),
                                         )
                                     }
@@ -1065,75 +1227,30 @@ fun EditScreen(
                         }
                     }
                 }
-
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    "提醒依赖应用运行时的检查；关闭到期通知后将不再推送。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 6.dp),
-                )
-                Spacer(Modifier.height(10.dp))
             }
 
-            // ---------------------------------------------- 底部固定保存栏
-            HorizontalDivider(
-                thickness = 1.dp,
-                color = MaterialTheme.colorScheme.outlineVariant,
-            )
-            Surface(color = MaterialTheme.colorScheme.surface) {
-            Button(
-                onClick = {
-                    val finalName = name.trim()
-                    if (finalName.isEmpty()) {
-                        showError("请填写物品名称")
-                        // 提示在底部，同时把视线滚回顶部，避免用户看不到要填的字段
-                        scope.launch { scrollState.animateScrollTo(0) }
-                        return@Button
-                    }
-                    if (expireAt.isEmpty()) {
-                        showError("请填写到期日期（生产日期 + 有效期，或手动指定）")
-                        scope.launch { scrollState.animateScrollTo(0) }
-                        return@Button
-                    }
-                    if (!Dates.isValidISODate(expireAt)) {
-                        showError("到期日期格式不正确")
-                        return@Button
-                    }
-                    val amount = shelfLifeText.toIntOrNull() ?: 0
-                    val draft = ExpiryItem(
-                        id = existing?.id ?: "",
-                        name = finalName,
-                        category = category,
-                        productionDate = productionDate,
-                        shelfLife = amount,
-                        shelfLifeUnit = unit,
-                        expireAt = expireAt,
-                        remindDays = remindDays,
-                        quantity = quantity.coerceIn(1, MAX_QUANTITY),
-                        note = note.trim(),
-                        images = images,
-                        notifiedKeys = existing?.notifiedKeys ?: emptyList(),
-                        archived = existing?.archived ?: false,
-                        createdAt = existing?.createdAt ?: Dates.nowIsoTimestamp(),
-                        updatedAt = Dates.nowIsoTimestamp(),
-                        spaceId = store.resolveSpaceId(spaceId),
-                    )
-                    scope.launch {
-                        if (existing == null) store.createItem(context, draft)
-                        else store.updateItem(context, existing.id, draft)
-                        finish()
-                    }
-                },
-                modifier = Modifier
+            // ---------------------------------------------- 底部悬浮保存按钮
+            // 主页查询框同款磨砂胶囊：底部不再铺底板和分割线，表单从按钮底下穿过；
+            // 阴影由 frostedPill 四周留出，比原来的实心蓝底按钮更有立体感。
+            // navigationBarsPadding 把按钮整体抬到手势横条之上，不再压住系统小横条
+            Box(
+                Modifier
+                    .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 14.dp)
-                    .height(54.dp),
-                shape = RoundedCornerShape(16.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                ),
-            ) { Text(if (existing == null) "保存" else "保存", style = MaterialTheme.typography.titleMedium) }
+                    .navigationBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .height(52.dp)
+                    .frostedPill(RoundedCornerShape(26.dp))
+                    .clickable { save() },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "保存",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
             }
         }
 
@@ -1144,7 +1261,7 @@ fun EditScreen(
                 .align(Alignment.BottomCenter)
                 .imePadding()
                 .padding(horizontal = 12.dp, vertical = 6.dp)
-                .padding(bottom = 74.dp),
+                .padding(bottom = 92.dp),
         ) { data ->
             Snackbar(
                 snackbarData = data,
@@ -1227,21 +1344,6 @@ fun EditScreen(
         }
     }
 
-    voiceDialogTarget?.let { target ->
-        VoiceInputDialog(
-            prompt = when (target) {
-                "quick" -> "说出：物品名称 + 到期日 + 放在哪"
-                "note" -> "说出存放位置或备注"
-                else -> "说出物品名称"
-            },
-            onDismiss = { voiceDialogTarget = null },
-            onResult = { spoken ->
-                applySpoken(spoken)
-                voiceDialogTarget = null
-            },
-        )
-    }
-
     if (confirmDelete && existing != null) {
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
@@ -1309,12 +1411,61 @@ fun EditScreen(
         )
     }
 
+    // 圈选识别：框住照片上的日期/品名区域，放大重识后一键填字段
+    if (cropOcrOpen && images.isNotEmpty()) {
+        CropOcrOverlay(
+            paths = images.map { normalizeImagePath(it.path) }.filter { it.isNotEmpty() },
+            onDismiss = { cropOcrOpen = false },
+            onPickName = {
+                name = it.trim()
+                if (name.isNotEmpty()) nameFromOcr = true
+            },
+            onPickProduction = {
+                productionDate = it
+                productionFromOcr = true
+            },
+            onPickExpire = {
+                expireAt = it
+                manualExpire = true
+                expireFromOcr = true
+            },
+            onPickShelfLife = { amount, unitValue ->
+                shelfLifeText = amount.toString()
+                unit = unitValue
+                shelfLifeFromOcr = true
+            },
+            onPickNote = { text ->
+                note = (if (note.isBlank()) text else "$note\n$text").take(MAX_NOTE)
+            },
+        )
+    }
+
+    // 备注取字：相机拍照后圈选/整图识别，识别文字回填备注（临时图不进物品图集）
+    noteOcrPath?.let { p ->
+        CropOcrOverlay(
+            paths = listOf(p),
+            onDismiss = {
+                noteOcrPath = null
+                runCatching { ImageStore.imageFile(context, p).delete() }
+            },
+            onPickName = {},
+            onPickProduction = {},
+            onPickExpire = {},
+            onPickShelfLife = { _, _ -> },
+            onPickNote = { text ->
+                note = (if (note.isBlank()) text else "$note\n$text").take(MAX_NOTE)
+            },
+            noteOnly = true,
+        )
+    }
+
     // 全屏图片查看器：编辑中的草稿图片也能看（文件在入库时就已落盘）
-    viewerIndex?.let { idx ->
+    viewerState?.let { state ->
         ImageViewerOverlay(
             paths = images.map { it.path },
-            initialIndex = idx,
-            onDismiss = { viewerIndex = null },
+            initialIndex = state.index,
+            origin = state.origin,
+            onDismiss = { viewerState = null },
         )
     }
 }
@@ -1916,10 +2067,10 @@ private fun SelectBox(
 ) {
     Surface(
         onClick = onClick,
-        shape = RoundedCornerShape(10.dp),
+        shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.surface,
         border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-        modifier = modifier.height(48.dp),
+        modifier = modifier.height(44.dp),
     ) {
         Row(
             Modifier.padding(horizontal = 12.dp),
@@ -1991,10 +2142,10 @@ private fun QuantityStepper(value: Int, onChange: (Int) -> Unit, modifier: Modif
     }
 
     Surface(
-        shape = RoundedCornerShape(10.dp),
+        shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.surface,
         border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-        modifier = modifier.height(48.dp),
+        modifier = modifier.height(44.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             // 边界按「看到的值」判断，输入框里的中间态也一并照顾到
@@ -2053,7 +2204,7 @@ private fun QuantityStepper(value: Int, onChange: (Int) -> Unit, modifier: Modif
 private fun StepCell(symbol: String, enabled: Boolean, onClick: () -> Unit) {
     Box(
         Modifier
-            .size(width = 40.dp, height = 48.dp)
+            .size(width = 36.dp, height = 44.dp)
             .clickable(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
@@ -2066,9 +2217,28 @@ private fun StepCell(symbol: String, enabled: Boolean, onClick: () -> Unit) {
     }
 }
 
+/**
+ * 主页查询框同款「磨砂浮起」胶囊：柔投影 + 半透明面板色 + 一圈亮边。
+ *
+ * 与 HomeScreen 的 frostedPanel 同思路：不用 `Surface(color = 半透明, shadowElevation)`
+ * （M3 会把容器色当阴影底板画成矩形），改用 `Modifier.shadow` 显式中性阴影色，
+ * 且 `clip = false` 让投影四周边都留出来，保存按钮因此有立体感。
+ */
+@Composable
+private fun Modifier.frostedPill(shape: Shape): Modifier = this
+    .shadow(
+        elevation = 14.dp,
+        shape = shape,
+        clip = false,
+        ambientColor = Color(0x1F000000),
+        spotColor = Color(0x38000000),
+    )
+    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.97f), shape)
+    .border(0.8.dp, Color.White.copy(alpha = 0.55f), shape)
+    .clip(shape)
+
 /** 虚线描边修饰符（native Canvas 实现，Compose 官方 border 不支持 dash）。 */
-private fun Modifier.dashedBorder(color: Color, cornerRadius: Dp): Modifier = drawBehind {
-    val paint = android.graphics.Paint().apply {
+private fun Modifier.dashedBorder(color: Color, cornerRadius: Dp): Modifier = drawBehind {    val paint = android.graphics.Paint().apply {
         this.color = color.copy(alpha = 0.55f).toArgb()
         style = android.graphics.Paint.Style.STROKE
         strokeWidth = 1.5.dp.toPx()
@@ -2085,7 +2255,7 @@ private fun Modifier.dashedBorder(color: Color, cornerRadius: Dp): Modifier = dr
 @Composable
 private fun FormCard(content: @Composable ColumnScope.() -> Unit) {
     Surface(
-        shape = RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(18.dp),
         color = MaterialTheme.colorScheme.surface,
         tonalElevation = 1.dp,
         border = androidx.compose.foundation.BorderStroke(
@@ -2094,8 +2264,8 @@ private fun FormCard(content: @Composable ColumnScope.() -> Unit) {
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(
-            Modifier.fillMaxWidth().padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            Modifier.fillMaxWidth().padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
             content = content,
         )
     }
@@ -2103,51 +2273,22 @@ private fun FormCard(content: @Composable ColumnScope.() -> Unit) {
 
 /** 表单分组标题：主色文字 + 细分割线，把长表单切成三段，视觉层级更清楚。 */
 @Composable
-private fun EditSectionHeader(title: String, caption: String? = null) {
-    Column(Modifier.fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                title,
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.primary,
-                fontWeight = FontWeight.Bold,
-            )
-            Spacer(Modifier.width(10.dp))
-            HorizontalDivider(
-                Modifier.weight(1f),
-                thickness = 1.dp,
-                color = MaterialTheme.colorScheme.outlineVariant,
-            )
-        }
-        if (!caption.isNullOrBlank()) {
-            Text(
-                caption,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 2.dp),
-            )
-        }
-    }
-}
-
-/** 统一 40dp 的麦克风图标按钮：不使用文字，避免把输入框挤窄。 */
-@Composable
-private fun MicIconButton(
-    onClick: () -> Unit,
-    enabled: Boolean,
-    description: String,
-) {
-    IconButton(
-        onClick = onClick,
-        enabled = enabled,
-        modifier = Modifier.size(40.dp),
+private fun EditSectionHeader(title: String) {
+    Row(
+        Modifier.fillMaxWidth().padding(top = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(
-            painter = painterResource(R.drawable.ic_mic),
-            contentDescription = description,
-            modifier = Modifier.size(20.dp),
-            tint = if (enabled) MaterialTheme.colorScheme.primary
-            else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
+        Text(
+            title,
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(Modifier.width(10.dp))
+        HorizontalDivider(
+            Modifier.weight(1f),
+            thickness = 1.dp,
+            color = MaterialTheme.colorScheme.outlineVariant,
         )
     }
 }

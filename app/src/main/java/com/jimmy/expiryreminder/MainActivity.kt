@@ -1,21 +1,20 @@
 package com.jimmy.expiryreminder
 
 import android.Manifest
+import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.window.BackEvent
-import android.window.OnBackAnimationCallback
-import android.window.OnBackInvokedDispatcher
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.PredictiveBackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -25,9 +24,8 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Surface
-import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -39,17 +37,17 @@ import androidx.compose.runtime.saveable.mapSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.jimmy.expiryreminder.core.ExpiryStore
 import com.jimmy.expiryreminder.core.SettingsStore
 import com.jimmy.expiryreminder.notify.ReminderService
 import com.jimmy.expiryreminder.ui.AppTheme
+import com.jimmy.expiryreminder.ui.BackDragStrip
 import com.jimmy.expiryreminder.ui.CategoryScreen
 import com.jimmy.expiryreminder.ui.ConflictsScreen
 import com.jimmy.expiryreminder.ui.EditScreen
@@ -87,6 +85,51 @@ class MainActivity : ComponentActivity() {
 
         /** 桌面小组件右上角「+」：直接打开新增页。 */
         const val EXTRA_OPEN_ADD = "widget_open_add"
+
+        /** 桌面小组件「+」左侧相机键：直接打开与主页相机按钮相同的选图（拍照）页。 */
+        const val EXTRA_OPEN_CAMERA = "widget_open_camera"
+
+        /**
+         * 长按桌面图标的快捷方式带入的标识（见 res/xml/shortcuts.xml）。
+         * 快捷方式 XML 的 extra 只能是字符串，所以不能复用上面的 Boolean extra。
+         */
+        const val EXTRA_SHORTCUT = "shortcut"
+
+        /** 快捷方式：直接进新增页。 */
+        const val SHORTCUT_ADD = "add"
+
+        /** 快捷方式：直接进选图（拍照）页。 */
+        const val SHORTCUT_CAMERA = "camera"
+    }
+
+    /**
+     * 应用已在运行时再次收到启动 Intent（长按桌面快捷方式、或小组件按钮）走这里。
+     * 用 State 而非直接设置 screen：screen 是 Compose 内部 rememberSaveable 状态，
+     * 由 setContent 里的 LaunchedEffect 消费后再清空，等价于「一次性跳转指令」。
+     */
+    private val pendingNav = mutableStateOf<Intent?>(null)
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // 覆盖 Activity.intent，避免后续读取到上一次的旧 extra
+        setIntent(intent)
+        pendingNav.value = intent
+    }
+
+    /** 把启动 Intent 翻译成目标页面；普通点图标启动返回 null（停在主页）。 */
+    private fun resolveScreen(intent: Intent?): Screen? {
+        if (intent == null) return null
+        // 桌面小组件：指定物品 / 新增 / 拍照
+        intent.getStringExtra(EXTRA_OPEN_ITEM_ID)?.takeIf { it.isNotEmpty() }
+            ?.let { return Screen.Edit(itemId = it) }
+        if (intent.getBooleanExtra(EXTRA_OPEN_ADD, false)) return Screen.Edit(itemId = null)
+        if (intent.getBooleanExtra(EXTRA_OPEN_CAMERA, false)) return Screen.PickImages()
+        // 长按桌面图标的快捷方式
+        when (intent.getStringExtra(EXTRA_SHORTCUT)) {
+            SHORTCUT_ADD -> return Screen.Edit(itemId = null)
+            SHORTCUT_CAMERA -> return Screen.PickImages()
+        }
+        return null
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -132,19 +175,19 @@ class MainActivity : ComponentActivity() {
             }
 
             AppTheme(themeMode.name) {
-                Surface(modifier = Modifier.fillMaxSize()) {
+                Surface {
                     var screen by rememberSaveable(stateSaver = ScreenSaver) {
-                        // 桌面小组件点条目进来时直接打开该物品的编辑页
-                        val openItem = intent?.getStringExtra(EXTRA_OPEN_ITEM_ID)
-                            ?.takeIf { it.isNotEmpty() }
-                        val openAdd = intent?.getBooleanExtra(EXTRA_OPEN_ADD, false) == true
-                        mutableStateOf<Screen>(
-                            when {
-                                openItem != null -> Screen.Edit(itemId = openItem)
-                                openAdd -> Screen.Edit(itemId = null)
-                                else -> Screen.Home
-                            },
-                        )
+                        // 冷启动首屏由启动 Intent 决定：小组件按钮、或长按图标的快捷方式。
+                        // 应用已运行时的二次触发走 onNewIntent → pendingNav（见下）。
+                        mutableStateOf(resolveScreen(intent) ?: Screen.Home)
+                    }
+                    // 应用已在前台时点快捷方式/小组件按钮不会重建 Activity，
+                    // 系统走 onNewIntent，这里消费掉这条「一次性跳转指令」再清空。
+                    val navIntent by pendingNav
+                    LaunchedEffect(navIntent) {
+                        val target = resolveScreen(navIntent) ?: return@LaunchedEffect
+                        screen = target
+                        pendingNav.value = null
                     }
                     // 筛选状态放在导航层：进出编辑/设置页回来仍然是上次的搜索词与分类
                     val homeFilter = rememberSaveable(saver = HomeFilterState.Saver) {
@@ -154,160 +197,146 @@ class MainActivity : ComponentActivity() {
                     // 返回时原样恢复——否则列表滚动位置会丢，回到顶部。
                     // 只包主页：编辑页等二级页每次进入都应是干净的，不恢复上次草稿。
                     val homeStateHolder = rememberSaveableStateHolder()
-                    // 预测性返回：手指从边缘拖动时页面跟手缩小、右移，松手完成返回。
-                    // 开关关闭时退回普通返回，行为一致但没有跟手动画。
-                    var backProgress by remember { mutableFloatStateOf(0f) }
-                    val uiScope = rememberCoroutineScope()
-                    val predictiveBack by SettingsStore.get().predictiveBackEnabled
-                        .collectAsStateWithLifecycle()
-                    // 顶部返回箭头、编辑页「保存」也走同一段退出动画：
-                    // 只拦系统手势的话，点按钮会「瞬间跳回主页」，看起来像没适配。
-                    var manualBack by remember { mutableStateOf(false) }
-                    fun goBack() {
-                        if (screen != Screen.Home) manualBack = true
-                    }
-                    LaunchedEffect(manualBack) {
-                        if (!manualBack) return@LaunchedEffect
-                        animate(0f, 1f, animationSpec = tween(180)) { value, _ ->
-                            backProgress = value
-                        }
-                        screen = Screen.Home
-                        manualBack = false
-                    }
-                    // 手势完成后不立刻把进度清零：让新页面从缩小状态缓回全屏，
-                    // 避免「松手瞬间弹一下」的割裂感。
+                    // 返回只有一种转场（与左上角按钮一致）：整页右滑出 + 新页淡入。
+                    var exitKind by remember { mutableStateOf(ExitKind.Enter) }
+
+                    // —— 跟手返回（左边缘拖拽，参考酷安）——
+                    // 本机 ColorOS 17 不分发预测性返回进度（onBackProgressed 恒为 0，
+                    // 左右边缘皆然），酷安是把左边缘从系统手势里排除后自己处理触摸。
+                    // 这里同样：BackDragStrip 申请系统手势排除并驱动进度，页面 1:1 跟手
+                    // 位移，底层渲染主页 + 随进度减弱的压暗层，松手按位移/速度提交或回弹。
+                    var backDragActive by remember { mutableStateOf(false) }
+                    var backDragProgress by remember { mutableFloatStateOf(0f) }
+                    // 二级页刚切入时 AnimatedContent 的出场转场还在跑，旧主页仍在组合里；
+                    // 此时立刻拖拽会让底层主页与它同时组合（SaveableStateProvider 同 key
+                    // 冲突），等转场落定再启用手势条。
+                    var navSettled by remember { mutableStateOf(false) }
                     LaunchedEffect(screen) {
-                        if (screen == Screen.Home && backProgress > 0f) {
-                            animate(backProgress, 0f, animationSpec = tween(220)) { value, _ ->
-                                backProgress = value
-                            }
-                        }
+                        navSettled = false
+                        kotlinx.coroutines.delay(300)
+                        navSettled = true
                     }
-                    val activity = LocalContext.current as? ComponentActivity
-                    // Android 14+ 直接在 Activity 的 OnBackInvokedDispatcher 上注册动画回调：
-                    // 和酷安一类应用一样按页面拿 onBackStarted/onBackProgressed，
-                    // 不再依赖 Compose 封装层的转译，设置页/新增页手势才能稳定跟手。
-                    DisposableEffect(activity, predictiveBack, screen) {
-                        val dispatcher = activity?.onBackInvokedDispatcher
-                        if (Build.VERSION.SDK_INT >= 34 && predictiveBack &&
-                            screen != Screen.Home && dispatcher != null
-                        ) {
-                            val callback = object : OnBackAnimationCallback {
-                                override fun onBackStarted(backEvent: BackEvent) {
-                                    // 个别 ROM 首个事件 progress 为 0，给一点起始位移，避免看起来没反应
-                                    backProgress = maxOf(backProgress, 0.08f)
-                                }
+                    var containerWidthPx by remember { mutableFloatStateOf(0f) }
+                    val navScope = rememberCoroutineScope()
 
-                                override fun onBackProgressed(backEvent: BackEvent) {
-                                    backProgress = backEvent.progress.coerceIn(0f, 1f)
-                                }
-
-                                override fun onBackCancelled() {
-                                    uiScope.launch {
-                                        animate(backProgress, 0f, animationSpec = tween(160)) { value, _ ->
-                                            backProgress = value
-                                        }
-                                    }
-                                }
-
-                                override fun onBackInvoked() {
-                                    screen = Screen.Home
-                                }
-                            }
-                            dispatcher.registerOnBackInvokedCallback(
-                                OnBackInvokedDispatcher.PRIORITY_DEFAULT, callback,
-                            )
-                            onDispose { dispatcher.unregisterOnBackInvokedCallback(callback) }
-                        } else {
-                            onDispose { }
-                        }
-                    }
-                    // 低版本没有 OnBackAnimationCallback，沿用 Compose 的 PredictiveBackHandler
-                    if (Build.VERSION.SDK_INT < 34) {
-                        PredictiveBackHandler(enabled = predictiveBack && screen != Screen.Home) { progress ->
-                            try {
-                                progress.collect { event -> backProgress = event.progress }
-                                screen = Screen.Home
-                            } catch (e: kotlinx.coroutines.CancellationException) {
-                                uiScope.launch {
-                                    animate(backProgress, 0f, animationSpec = tween(160)) { value, _ ->
-                                        backProgress = value
-                                    }
-                                }
-                                throw e
-                            }
-                        }
-                    }
-                    BackHandler(enabled = !predictiveBack && screen != Screen.Home) {
+                    fun navHome(kind: ExitKind) {
+                        if (screen == Screen.Home) return
+                        exitKind = kind
                         screen = Screen.Home
                     }
-                    // 关键：在组合期把进度算成普通 Float，再交给 graphicsLayer。
-                    // 直接在 graphicsLayer 的 lambda 里读 State 不会稳定触发重绘，
-                    // 表现就是「手势走了但页面不动」。
-                    val backP = backProgress.coerceIn(0f, 1f)
-                    // 跟手时后面压一层暗色，让「页面被推走」有参照物（不跟随缩放）
-                    Box(
-                        Modifier
-                            .fillMaxSize()
-                            .background(Color.Black.copy(alpha = 0.22f * backP)),
-                    )
-                    Box(
-                        Modifier
-                            .fillMaxSize()
-                            .graphicsLayer {
-                                val s = 1f - 0.12f * backP
-                                scaleX = s
-                                scaleY = s
-                                translationX = 64.dp.toPx() * backP
-                                alpha = 1f - 0.28f * backP
-                                transformOrigin = TransformOrigin(1f, 0.5f)
-                                shape = RoundedCornerShape(24.dp)
-                                clip = true
-                            },
-                    ) {
-                    // 流体动效：进二级页从右侧轻推进入，回主页反向退出；
-                    // 时长压到 220~260ms，避免「动画慢半拍」。
-                    AnimatedContent(
-                        targetState = screen,
-                        transitionSpec = {
-                            val forward = targetState !is Screen.Home
-                            if (forward) {
-                                // 进二级页：保留短距离横向层级感
-                                (slideInHorizontally(tween(220)) { it / 10 } +
-                                    fadeIn(tween(180))) togetherWith
-                                    (slideOutHorizontally(tween(220)) { -it / 16 } +
-                                        fadeOut(tween(140)))
+                    fun goBack() = navHome(ExitKind.ByButton)
+
+                    fun finishBackDrag(commit: Boolean) {
+                        navScope.launch {
+                            if (commit) {
+                                // 补齐到全宽后提交：新旧页瞬时互换（ByDrag snap 转场），
+                                // 主页从底层状态恢复，视觉无缝
+                                if (backDragProgress < 1f) {
+                                    animate(
+                                        backDragProgress, 1f,
+                                        animationSpec = tween(160, easing = FastOutSlowInEasing),
+                                    ) { v, _ -> backDragProgress = v }
+                                }
+                                exitKind = ExitKind.ByDrag
+                                screen = Screen.Home
+                                backDragProgress = 0f
+                                backDragActive = false
                             } else {
-                                // 回主页/保存完成：不再模拟返回手势的缩放+侧滑，
-                                // 只用平台式淡入淡出，避免「保存像被拖回去」的生硬感
-                                fadeIn(tween(180)) togetherWith fadeOut(tween(140))
+                                // 回弹：页面滑回原位
+                                animate(
+                                    backDragProgress, 0f,
+                                    animationSpec = tween(240, easing = FastOutSlowInEasing),
+                                ) { v, _ -> backDragProgress = v }
+                                backDragActive = false
                             }
-                        },
-                        label = "screen",
-                    ) { target ->
+                        }
+                    }
+
+                    val homeContent: @Composable () -> Unit = {
+                        HomeScreen(
+                            filter = homeFilter,
+                            onAdd = { defaultCategory, defaultSpace ->
+                                screen = Screen.Edit(
+                                    itemId = null,
+                                    defaultCategory = defaultCategory,
+                                    defaultSpace = defaultSpace,
+                                )
+                            },
+                            onOcr = { defaultCategory, defaultSpace ->
+                                screen = Screen.PickImages(
+                                    defaultCategory = defaultCategory,
+                                    defaultSpace = defaultSpace,
+                                )
+                            },
+                            onEdit = { id -> screen = Screen.Edit(id) },
+                            onSettings = { screen = Screen.Settings },
+                            onCategories = { screen = Screen.Categories },
+                            onSpaces = { screen = Screen.Spaces },
+                            onShare = { ids -> screen = Screen.Transfer(ids) },
+                        )
+                    }
+
+                    // 返回统一走按钮同款转场：二级页拦截返回（手势/返回键），
+                    // 主页不拦截，系统返回直接回桌面并保留平台动画。
+                    // 拖拽进行中禁用 BackHandler，避免系统返回与拖拽提交打架。
+                    BackHandler(enabled = screen != Screen.Home && !backDragActive) {
+                        navHome(ExitKind.ByButton)
+                    }
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .onGloballyPositioned { containerWidthPx = it.size.width.toFloat() },
+                    ) {
+                        // 拖拽返回时，底层渲染主页（恢复上次状态）+ 随进度减弱的压暗层
+                        if (backDragActive && screen != Screen.Home) {
+                            Box(Modifier.fillMaxSize()) {
+                                homeStateHolder.SaveableStateProvider(key = "home") {
+                                    homeContent()
+                                }
+                                Box(
+                                    Modifier
+                                        .fillMaxSize()
+                                        .background(
+                                            Color.Black.copy(alpha = 0.5f * (1f - backDragProgress)),
+                                        ),
+                                )
+                            }
+                        }
+                        // 流体动效：进二级页从右侧轻推进入；返回（按钮/手势）整页右滑出；保存淡入淡出。
+                        // 跟手拖拽期间整层随进度平移（graphicsLayer 只重绘不重组）。
+                        AnimatedContent(
+                            targetState = screen,
+                            modifier = Modifier.graphicsLayer {
+                                translationX = backDragProgress * containerWidthPx
+                            },
+                            transitionSpec = {
+                                if (targetState !is Screen.Home) {
+                                    // 进二级页：保留短距离横向层级感
+                                    (slideInHorizontally(tween(220)) { it / 10 } +
+                                        fadeIn(tween(180))) togetherWith
+                                        (slideOutHorizontally(tween(220)) { -it / 16 } +
+                                            fadeOut(tween(140)))
+                                } else {
+                                    when (exitKind) {
+                                        ExitKind.ByButton ->
+                                            // 返回（按钮或系统手势）：整页向右滑出、新页淡入
+                                            fadeIn(tween(200)) togetherWith
+                                                (slideOutHorizontally(tween(240)) { it } +
+                                                    fadeOut(tween(220)))
+                                        ExitKind.ByDrag ->
+                                            // 跟手返回提交：页面已拖出屏外，新旧页瞬时互换
+                                            fadeIn(snap()) togetherWith slideOutHorizontally(snap())
+                                        else ->
+                                            // 保存/删除完成：平台式淡入淡出，不模拟返回手势
+                                            fadeIn(tween(180)) togetherWith fadeOut(tween(140))
+                                    }
+                                }
+                            },
+                            label = "screen",
+                        ) { target ->
                     when (val s = target) {
                         is Screen.Home -> homeStateHolder.SaveableStateProvider(key = "home") {
-                            HomeScreen(
-                                filter = homeFilter,
-                                onAdd = { defaultCategory, defaultSpace ->
-                                    screen = Screen.Edit(
-                                        itemId = null,
-                                        defaultCategory = defaultCategory,
-                                        defaultSpace = defaultSpace,
-                                    )
-                                },
-                                onOcr = { defaultCategory, defaultSpace ->
-                                    screen = Screen.PickImages(
-                                        defaultCategory = defaultCategory,
-                                        defaultSpace = defaultSpace,
-                                    )
-                                },
-                                onEdit = { id -> screen = Screen.Edit(id) },
-                                onSettings = { screen = Screen.Settings },
-                                onCategories = { screen = Screen.Categories },
-                                onSpaces = { screen = Screen.Spaces },
-                                onShare = { ids -> screen = Screen.Transfer(ids) },
-                            )
+                            homeContent()
                         }
                         is Screen.PickImages -> PickImagesScreen(
                             onBack = { goBack() },
@@ -351,7 +380,7 @@ class MainActivity : ComponentActivity() {
                                 onEditExisting = { id -> screen = Screen.Edit(id) },
                                 onDone = { goBack() },
                                 // 本分支：保存/删除成功走平台式淡入淡出，不模拟返回手势
-                                onSaved = { screen = Screen.Home },
+                                onSaved = { navHome(ExitKind.AfterSave) },
                             )
                         }
                         is Screen.Settings -> SettingsScreen(
@@ -374,12 +403,27 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                     }
+                        // 左边缘跟手返回手势条：最顶层铺满左侧 24dp，
+                        // 系统手势排除后由它驱动上面的拖拽状态机
+                        BackDragStrip(
+                            enabled = screen != Screen.Home && navSettled && containerWidthPx > 0f,
+                            screenWidthPx = containerWidthPx,
+                            onDrag = { pr ->
+                                backDragActive = true
+                                backDragProgress = pr
+                            },
+                            onFinish = { commit -> finishBackDrag(commit) },
+                            modifier = Modifier.align(Alignment.CenterStart),
+                        )
                     }
                 }
             }
         }
     }
 }
+
+/** 离开二级页的转场方式：返回走横向滑出，跟手拖拽提交走瞬时互换，保存/删除走淡入淡出。 */
+private enum class ExitKind { Enter, ByButton, ByDrag, AfterSave }
 
 sealed interface Screen {
     data object Home : Screen

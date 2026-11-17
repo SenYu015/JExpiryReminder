@@ -128,6 +128,6 @@ object SyncStateStore {
         }
         obj.put("peers", peerJson)
         obj.put("syncedIds", JSONArray(syncedIds.toList()))
-        runCatching { file(context).writeText(obj.toString(2)) }
+        runCatching { AtomicFiles.writeText(file(context), obj.toString(2)) }
     }
 }

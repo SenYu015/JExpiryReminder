@@ -48,10 +48,10 @@ class SyncIdCompatTest {
     }
 
     @Test
-    fun `数据版本已升到 v11（含 syncId 与分类默认提醒）`() {
+    fun `数据版本已升到 v12（含 syncId、分类默认提醒与循环任务标记）`() {
         // v9 起 data.json 带 rev/revision 时钟，v10 加 syncId，
-        // 合并上游 v9「分类默认提醒」后用 v11 统一标记，避免与两侧历史版本号混淆
-        assertEquals(11, DATA_VERSION)
+        // 合并上游 v9「分类默认提醒」后用 v11 统一标记；v12 增加循环任务标记
+        assertEquals(12, DATA_VERSION)
     }
 
     @Test

@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  桌面图标长按快捷方式（Static Shortcuts，API 25+，本应用 minSdk 26）。
+
+  两个入口复用桌面小组件的同一套 extra 约定：
+    shortcut=add    -> MainActivity 直接落到「新增物品」编辑页
+    shortcut=camera -> MainActivity 直接落到选图（拍照）页
+
+  为什么 targetPackage 写死而不是用 ${applicationId}：
+  资源 XML 不走 manifest placeholder 替换，写 ${applicationId} 会变成字面量导致
+  快捷方式点了打不开。debug 包有 .debug 后缀，因此单独在 src/debug/res/xml/
+  放了一份同名文件覆盖（两份内容必须保持一致，只有包名不同）。
+-->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_add"
+        android:shortcutId="quick_add"
+        android:shortcutLongLabel="@string/shortcut_add_long"
+        android:shortcutShortLabel="@string/shortcut_add_short">
+        <intent
+            android:action="com.jimmy.expiryreminder.action.SHORTCUT_ADD"
+            android:targetClass="com.jimmy.expiryreminder.MainActivity"
+            android:targetPackage="com.jimmy.expiryreminder">
+            <!-- 值只能以字符串形式落进 Intent，代码里用 getStringExtra 读取 -->
+            <extra
+                android:name="shortcut"
+                android:value="add" />
+        </intent>
+    </shortcut>
+
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_camera"
+        android:shortcutId="quick_camera"
+        android:shortcutLongLabel="@string/shortcut_camera_long"
+        android:shortcutShortLabel="@string/shortcut_camera_short">
+        <intent
+            android:action="com.jimmy.expiryreminder.action.SHORTCUT_CAMERA"
+            android:targetClass="com.jimmy.expiryreminder.MainActivity"
+            android:targetPackage="com.jimmy.expiryreminder">
+            <extra
+                android:name="shortcut"
+                android:value="camera" />
+        </intent>
+    </shortcut>
+
+</shortcuts>

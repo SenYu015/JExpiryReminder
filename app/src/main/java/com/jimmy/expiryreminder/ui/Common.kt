@@ -1,15 +1,22 @@
 package com.jimmy.expiryreminder.ui
 
 import android.graphics.BitmapFactory
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -34,12 +41,16 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
@@ -313,6 +324,98 @@ private fun InputBoxShell(
                 it()
             }
         }
+    }
+}
+
+/**
+ * 全站统一的磨砂浮起胶囊：柔投影 + 高不透明面板色 + 一圈亮边。
+ *
+ * 与首页/编辑页原有实现同思路：不用 `Surface(color=半透明, shadowElevation)`
+ * （M3 会把容器色当阴影底板画成矩形，从圆角外透出白块），改用 `Modifier.shadow`
+ * 显式中性阴影色 + 单独背景层 + 亮边，`clip=false` 让投影四周都留出来。
+ * 面板色用 0.97 高不透明，避免浮在列表上时把下方文字透上来（看起来像没浮起来）。
+ */
+@Composable
+internal fun Modifier.frostedPanel(
+    shape: Shape = RoundedCornerShape(18.dp),
+    elevation: Dp = 12.dp,
+    fill: Color = MaterialTheme.colorScheme.surface,
+    borderColor: Color = Color.White.copy(alpha = 0.55f),
+    borderWidth: Dp = 0.8.dp,
+): Modifier = this
+    .shadow(
+        elevation = elevation,
+        shape = shape,
+        clip = false,
+        ambientColor = Color(0x14000000),
+        spotColor = Color(0x33000000),
+    )
+    .background(fill.copy(alpha = 0.97f), shape)
+    .border(borderWidth, borderColor, shape)
+    .clip(shape)
+
+/**
+ * 全站统一的开关（ColorOS 风格）：胶囊轨道 + 圆形滑块。
+ *
+ * - 关闭：轨道浅灰、灰圆停左侧；
+ * - 打开：轨道浅蓝、蓝圆停右侧。
+ *
+ * 圆点本身带颜色与轻投影，位置与配色都用动画过渡。用于设置页与编辑页，
+ * 取代 Material3 默认 Switch（默认滑块是白色，与整体蓝灰配色不统一）。
+ */
+@Composable
+internal fun AppSwitch(
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
+    val track by animateColorAsState(
+        targetValue = if (checked) MaterialTheme.colorScheme.primaryContainer
+        else MaterialTheme.colorScheme.surfaceContainerHighest,
+        label = "switchTrack",
+    )
+    val knob by animateColorAsState(
+        targetValue = if (checked) MaterialTheme.colorScheme.primary
+        else MaterialTheme.colorScheme.outline,
+        label = "switchKnob",
+    )
+    // animateDpAsState 在该 BOM 组合下不可解析，改用 Animatable<Float> 驱动位移
+    val knobProgress = remember { Animatable(if (checked) 1f else 0f) }
+    LaunchedEffect(checked) {
+        knobProgress.animateTo(
+            targetValue = if (checked) 1f else 0f,
+            animationSpec = spring(
+                dampingRatio = Spring.DampingRatioNoBouncy,
+                stiffness = Spring.StiffnessMedium,
+            ),
+        )
+    }
+    val knobX = (20f * knobProgress.value).dp
+    val height = 32.dp
+    val knobSize = 28.dp
+    Box(
+        modifier
+            .size(width = 52.dp, height = height)
+            .clip(RoundedCornerShape(height / 2))
+            .background(track)
+            .toggleable(
+                value = checked,
+                enabled = enabled,
+                role = Role.Switch,
+                onValueChange = onCheckedChange,
+            )
+            .padding(2.dp),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Box(
+            Modifier
+                .offset(x = knobX)
+                .size(knobSize)
+                .shadow(2.dp, CircleShape, clip = false)
+                .clip(CircleShape)
+                .background(knob),
+        )
     }
 }
 

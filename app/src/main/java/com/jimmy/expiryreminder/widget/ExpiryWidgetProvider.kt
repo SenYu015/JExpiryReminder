@@ -107,6 +107,7 @@ object WidgetData {
                     daysText = if (item.expireAt.isBlank()) "未设置"
                     else Dates.describeRemaining(item.expireAt),
                     expireText = if (item.expireAt.isBlank()) "到期 未设置"
+                    else if (item.repeatEnabled) "本周期到期 ${item.expireAt}"
                     else "到期 ${item.expireAt}",
                     subText = subText,
                     barColor = runCatching {
@@ -128,6 +129,9 @@ object WidgetData {
 abstract class ExpiryWidgetBase : AppWidgetProvider() {
 
     protected abstract val layoutRes: Int
+
+    /** 计数右侧标签：2×2 宽度最紧，只能放两个字。 */
+    protected open val countLabel: String = "到期列表"
 
     override fun onUpdate(
         context: Context,
@@ -164,12 +168,16 @@ abstract class ExpiryWidgetBase : AppWidgetProvider() {
         val dark = WidgetTheme.isDark(context)
         val palette = WidgetTheme.palette(dark)
         views.setTextViewText(R.id.widget_count, count.toString())
-        views.setTextViewText(R.id.widget_count_label, "到期列表")
+        views.setTextViewText(R.id.widget_count_label, countLabel)
         views.setTextColor(R.id.widget_count, palette.title)
         views.setTextColor(R.id.widget_count_label, palette.accent)
         views.setTextColor(R.id.widget_empty, palette.muted)
         views.setOnClickPendingIntent(R.id.widget_add, addPendingIntent(context))
+        views.setOnClickPendingIntent(R.id.widget_camera, cameraPendingIntent(context))
         views.setOnClickPendingIntent(R.id.widget_count, launchAppPendingIntent(context))
+        // 相机键：圆形底与图标色都跟随应用主题（图标用 colorFilter 着色，不影响底形）
+        views.setInt(R.id.widget_camera, "setBackgroundResource", WidgetTheme.camBg(dark))
+        views.setInt(R.id.widget_camera, "setColorFilter", WidgetTheme.camIcon(dark))
 
         // 不再提供独立背景图/透明度；卡片颜色跟随应用浅色/深色主题
         views.setInt(
@@ -222,6 +230,16 @@ abstract class ExpiryWidgetBase : AppWidgetProvider() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
+    /** 「+」左侧相机键：落到与主页相机按钮相同的选图（拍照）页。 */
+    private fun cameraPendingIntent(context: Context): PendingIntent =
+        PendingIntent.getActivity(
+            context, 7002,
+            Intent(context, MainActivity::class.java)
+                .putExtra(MainActivity.EXTRA_OPEN_CAMERA, true)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
     companion object {
         /** 应用内数据变化时发的私有刷新广播，不对外暴露。 */
         const val ACTION_REFRESH = "com.jimmy.expiryreminder.action.WIDGET_REFRESH"
@@ -249,6 +267,7 @@ abstract class ExpiryWidgetBase : AppWidgetProvider() {
 /** 2×2 紧凑：只显示最紧急的几条。 */
 class ExpiryWidgetSmall : ExpiryWidgetBase() {
     override val layoutRes: Int = R.layout.widget_small
+    override val countLabel: String = "到期"
 }
 
 /** 4×2 中等：一屏能看更多条目。 */

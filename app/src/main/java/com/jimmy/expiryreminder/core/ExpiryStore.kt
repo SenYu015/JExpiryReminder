@@ -234,13 +234,16 @@ class ExpiryStore private constructor() {
         mutex.withLock {
             if (_state.value.loaded) return
             val file = ImageStore.dataFile(context)
+            // 主文件损坏（写一半、被外部改坏）时退回上一次成功写入的 .bak，并把它扶正
             var stored: JSONObject? = null
-            if (file.exists()) {
-                try {
-                    stored = JSONObject(file.readText())
-                } catch (_: Exception) {
-                    stored = null
+            for (candidate in listOf(file, AtomicFiles.backupOf(file))) {
+                if (!candidate.exists()) continue
+                val parsed = runCatching { JSONObject(candidate.readText()) }.getOrNull() ?: continue
+                stored = parsed
+                if (candidate != file) {
+                    runCatching { candidate.copyTo(file, overwrite = true) }
                 }
+                break
             }
             val rawItems = stored?.optJSONArray("items")
             val normalized = if (rawItems != null) {
@@ -434,7 +437,7 @@ class ExpiryStore private constructor() {
             revision = next.revision,
             categoryRemindDefaults = next.categoryRemindDefaults,
         )
-        file.writeText(payload.toJson().toString(2))
+        AtomicFiles.writeText(file, payload.toJson().toString(2))
     }
 
     /** 供导入后整体重载。 */
@@ -550,6 +553,34 @@ class ExpiryStore private constructor() {
             _state.value = _state.value.copy(items = _state.value.items + item)
             persistLocked(context)
         }
+    }
+
+    /**
+     * 循环物品「完成本次」：以实际完成日为新起点推进周期，并清空本周期提醒记录。
+     * 返回新的到期日；非循环物品、周期不合法或 id 不存在时返回 null（不写盘）。
+     */
+    suspend fun completeCycle(
+        context: Context,
+        id: String,
+        today: java.time.LocalDate = java.time.LocalDate.now(),
+    ): String? {
+        var nextExpire: String? = null
+        mutex.withLock {
+            val list = _state.value.items.toMutableList()
+            val index = list.indexOfFirst { it.id == id }
+            if (index < 0) return@withLock
+            val current = list[index]
+            if (!current.repeatEnabled || current.shelfLife <= 0) return@withLock
+            val advanced = ExpiryCalc.advanceCycle(
+                current, today, Dates.nowIsoTimestamp(),
+            )
+            if (advanced.expireAt == current.expireAt) return@withLock
+            nextExpire = advanced.expireAt
+            list[index] = advanced
+            _state.value = _state.value.copy(items = list)
+            persistLocked(context)
+        }
+        return nextExpire
     }
 
     suspend fun updateItem(context: Context, id: String, patch: ExpiryItem) {
@@ -992,7 +1023,7 @@ class ExpiryStore private constructor() {
 
     /** 把合并后的 data.json 写回磁盘（导入合并模式用）。 */
     suspend fun applyMergedDataJson(context: Context, mergedJson: String) {
-        ImageStore.dataFile(context).writeText(mergedJson)
+        AtomicFiles.writeText(ImageStore.dataFile(context), mergedJson)
         reload(context)
     }
 }

@@ -288,7 +288,7 @@ object ConflictStore {
 
     private fun persist(context: Context, list: List<PendingConflict>) {
         runCatching {
-            file(context).writeText(JSONArray(list.map { it.toJson() }).toString(2))
+            AtomicFiles.writeText(file(context), JSONArray(list.map { it.toJson() }).toString(2))
         }
     }
 }

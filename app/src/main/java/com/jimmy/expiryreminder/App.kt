@@ -15,6 +15,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import java.io.File
 
 class App : Application() {
 
@@ -27,6 +28,9 @@ class App : Application() {
         // 旧版本的自定义小组件背景图已不再使用，顺手清理；同时按当前主题刷新小组件配色
         WidgetPrefs.clearLegacyBackground(this)
         ExpiryWidgetBase.refreshAll(this)
+        // 语音输入已移除：旧版本把 66MB 的 Vosk 模型解压到 files/vosk-cn，
+        // 升级安装不会自动删文件，这里清一次释放空间（目录不存在时是无操作）
+        appScope.launch { File(filesDir, "vosk-cn").deleteRecursively() }
         // 自动同步：跟随设置开关常驻发现与合并（开关关闭时只是挂一个观察者，不占端口）
         AutoSyncEngine.watch(this)
         // 数据一变就刷新桌面的三个尺寸小组件（只读本地文件，不联网）

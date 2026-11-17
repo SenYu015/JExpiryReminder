@@ -12,7 +12,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -44,7 +43,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -63,6 +61,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -75,6 +74,7 @@ import com.jimmy.expiryreminder.core.AutoSyncEngine
 import com.jimmy.expiryreminder.core.Backup
 import com.jimmy.expiryreminder.core.ConflictStore
 import com.jimmy.expiryreminder.core.ExpiryStore
+import com.jimmy.expiryreminder.core.PeerTrust
 import com.jimmy.expiryreminder.core.SettingsStore
 import com.jimmy.expiryreminder.core.StatCard
 import com.jimmy.expiryreminder.core.SyncStateStore
@@ -83,9 +83,8 @@ import com.jimmy.expiryreminder.notify.ReminderService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.time.format.DateTimeFormatter
 
-/** 设置页：主题、通知、备份导出导入、跨设备传输、清空数据。 */
+/** 设置页：通知、外观、同步、备份与关于；全部分组平铺，不再折叠。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -> Unit) {
@@ -100,8 +99,8 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
     val statCards by settings.statCards.collectAsStateWithLifecycle()
     val autoSyncEnabled by settings.autoSyncEnabled.collectAsStateWithLifecycle()
     val autoSyncOnBoot by settings.autoSyncOnBoot.collectAsStateWithLifecycle()
-    val predictiveBackEnabled by settings.predictiveBackEnabled.collectAsStateWithLifecycle()
     val liveUpdateEnabled by settings.liveUpdateEnabled.collectAsStateWithLifecycle()
+    val hideNotificationDetail by settings.hideNotificationDetail.collectAsStateWithLifecycle()
     val syncStatus by AutoSyncEngine.status.collectAsStateWithLifecycle()
     val pendingConflicts by ConflictStore.conflicts.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
@@ -115,10 +114,12 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
     var showStatCards by remember { mutableStateOf(false) }
     var pendingImport by remember { mutableStateOf<Uri?>(null) }
     var showClearConfirm by remember { mutableStateOf(false) }
-    var showRomHelp by remember { mutableStateOf(false) }
-    var showLiveHelp by remember { mutableStateOf(false) }
+    var showLiveDetail by remember { mutableStateOf(false) }
+    var showTrusted by remember { mutableStateOf(false) }
+    var trustedTick by remember { mutableIntStateOf(0) }
+    var showReliabilityDetail by remember { mutableStateOf(false) }
 
-    // 权限/排程状态每次回到前台都重新读一遍：用户去系统设置改完回来能立刻看到结果
+    // 权限/能力状态每次回到前台都重新读一遍：用户去系统设置改完回来能立刻看到结果
     var reliabilityTick by remember { mutableStateOf(0) }
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -132,30 +133,25 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
     val batteryIgnored = remember(reliabilityTick) {
         ReminderService.isIgnoringBatteryOptimizations(context)
     }
-    val scheduledInfo = remember(reliabilityTick, notifyEnabled, notifyTime, useAlarmClock) {
-        ReminderService.scheduledInfo(context)
-    }
-    // 流体云 / 系统实时动态能力：每次回前台重读，用户去系统设置改完能立刻看到结果
+    // 流体云 / 系统实时动态能力：每次回前台重读
     val liveStatus = remember(reliabilityTick, liveUpdateEnabled) {
         ReminderService.liveUpdateStatus(context)
     }
     val liveStatusText = when {
+        !liveUpdateEnabled -> "已关闭，只保留逐条到期通知"
         !liveStatus.supported -> "系统低于 Android 16，不支持实时动态"
         liveStatus.promoted -> "已提升为实时动态 / 状态栏胶囊"
-        !liveStatus.canPost -> "系统未允许本应用发布实时动态，点「去开启」到系统设置"
+        !liveStatus.canPost -> "系统未允许发布实时动态，点此去开启"
         !liveStatus.active -> "当前没有 7 天内到期物品，或汇总尚未发布"
         liveStatus.promotable == false -> "通知不满足系统提升条件"
-        else -> "已请求提升但暂未提升；可点「重发」，或到系统设置检查实时活动开关"
+        else -> "已请求提升但暂未提升，点此可重发"
     }
-    // 已配对/已同步过的设备数：读本机水位文件，回前台刷新
-    val pairedCount = remember(reliabilityTick, autoSyncEnabled) {
-        SyncStateStore.peerCount(context)
+    // 已配对设备数：以长期信任表为准（水位文件只说明「同步过」，不代表仍被信任）
+    val pairedCount = remember(reliabilityTick, autoSyncEnabled, trustedTick) {
+        PeerTrust.count(context)
     }
-
-    // 一级分类折叠状态：默认展开常用两组，其余收起，减少一次看到的信息量
-    var expandedGroups by remember { mutableStateOf(setOf("通知与提醒", "外观与交互")) }
-    fun toggleGroup(key: String) {
-        expandedGroups = if (key in expandedGroups) expandedGroups - key else expandedGroups + key
+    val trustedPeers = remember(trustedTick, showTrusted) {
+        if (showTrusted) PeerTrust.all(context) else emptyList()
     }
 
     // 导出：SAF 建文档
@@ -237,22 +233,15 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
                 .padding(padding)
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(vertical = 8.dp),
+                .padding(horizontal = 16.dp, vertical = 8.dp),
         ) {
-            SettingsGroup(
-                title = "通知与提醒",
-                summary = "提醒开关、推送时刻与后台可靠性",
-                expanded = "通知与提醒" in expandedGroups,
-                onToggle = { toggleGroup("通知与提醒") },
-            ) {
-                SubsectionLabel("提醒开关")
-
+            SettingsSection("通知与提醒")
 
             ListItem(
                 headlineContent = { Text("启用到期通知") },
                 supportingContent = { Text("关闭后不再推送任何提醒") },
                 trailingContent = {
-                    Switch(
+                    AppSwitch(
                         checked = notifyEnabled,
                         onCheckedChange = { enabled ->
                             settings.update(context, notifyEnabled = enabled)
@@ -278,15 +267,29 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
             )
 
             ListItem(
-                headlineContent = { Text("流体云提醒") },
+                headlineContent = { Text("闹钟式提醒") },
                 supportingContent = {
-                    Text(
-                        if (liveUpdateEnabled) "7 天内到期物品合成一条常驻提醒；能否上流体云由系统决定"
-                        else "已关闭，只保留逐条到期通知",
-                    )
+                    Text("状态栏显示闹钟图标，抗系统省电清理最稳；关闭后提醒可能延后")
                 },
                 trailingContent = {
-                    Switch(
+                    AppSwitch(
+                        checked = useAlarmClock,
+                        onCheckedChange = { enabled ->
+                            settings.update(context, useAlarmClock = enabled)
+                            ReminderService.syncScheduled(
+                                context, store, notifyEnabled, notifyTime, enabled, liveUpdateEnabled,
+                            )
+                        },
+                    )
+                },
+            )
+
+            ListItem(
+                headlineContent = { Text("流体云提醒") },
+                supportingContent = { Text(liveStatusText) },
+                modifier = Modifier.clickable { showLiveDetail = true },
+                trailingContent = {
+                    AppSwitch(
                         checked = liveUpdateEnabled,
                         onCheckedChange = { enabled ->
                             settings.update(context, liveUpdateEnabled = enabled)
@@ -301,134 +304,54 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
             )
 
             ListItem(
-                headlineContent = { Text("流体云 / 实时动态诊断") },
-                supportingContent = { Text(liveStatusText) },
-                modifier = Modifier.clickable { showLiveHelp = true },
+                headlineContent = { Text("锁屏隐藏详情") },
+                supportingContent = { Text("开启后锁屏只显示「到期提醒」，解锁后才看得到物品名") },
                 trailingContent = {
-                    Row {
-                        TextButton(onClick = { ReminderService.openLiveUpdateSettings(context) }) {
-                            Text("去开启")
-                        }
-                        TextButton(onClick = {
-                            ReminderService.repostLiveSummary(context, store, liveUpdateEnabled)
-                            reliabilityTick++
-                            scope.launch { snackbar.showSnackbar("已重新发布到期汇总") }
-                        }) { Text("重发") }
-                    }
-                },
-            )
-
-                SubsectionLabel("后台可靠性")
-
-
-            ListItem(
-                headlineContent = { Text("闹钟式提醒") },
-                supportingContent = {
-                    Text("状态栏显示闹钟图标；抗系统省电清理最稳。关闭后提醒可能延后几分钟到几小时")
-                },
-                trailingContent = {
-                    Switch(
-                        checked = useAlarmClock,
+                    AppSwitch(
+                        checked = hideNotificationDetail,
                         onCheckedChange = { enabled ->
-                            settings.update(context, useAlarmClock = enabled)
-                            ReminderService.syncScheduled(
-                                context, store, notifyEnabled, notifyTime, enabled, liveUpdateEnabled,
-                            )
+                            settings.update(context, hideNotificationDetail = enabled)
+                            // 已发布的通知不会自己变，立刻按新口径重发一次流体云
+                            scope.launch {
+                                withContext(Dispatchers.IO) {
+                                    runCatching {
+                                        ReminderService.repostLiveSummary(context, store, liveUpdateEnabled)
+                                    }
+                                }
+                            }
                         },
                     )
                 },
             )
 
             ListItem(
-                headlineContent = { Text("精确闹钟权限") },
+                headlineContent = { Text("后台运行保障") },
                 supportingContent = {
                     Text(
-                        if (exactGranted) "已授予，提醒可以准点触发"
-                        else "未授予，只能排非精确闹钟，后台很容易被系统推迟甚至丢掉"
+                        buildString {
+                            append(if (exactGranted) "精确闹钟已授予" else "精确闹钟未授予")
+                            append(" · ")
+                            append(if (batteryIgnored) "已忽略电池优化" else "未忽略电池优化")
+                            append("\n点此检查权限并查看各机型自启动设置")
+                        },
                     )
                 },
-                trailingContent = {
-                    if (exactGranted) {
-                        Text(
-                            "已授予",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                    } else {
-                        TextButton(onClick = { openExactAlarmSettings(activity, context) }) {
-                            Text("去授权")
-                        }
-                    }
-                },
+                modifier = Modifier.clickable { showReliabilityDetail = true },
+                trailingContent = { TextButton(onClick = { showReliabilityDetail = true }) { Text("检查") } },
             )
+
+            SettingsSection("外观与显示")
 
             ListItem(
-                headlineContent = { Text("忽略电池优化") },
-                supportingContent = {
-                    Text(
-                        if (batteryIgnored) "已忽略，系统不会因省电清理掉提醒"
-                        else "未忽略，部分机型会限制后台运行，导致提醒不弹"
-                    )
-                },
-                trailingContent = {
-                    if (batteryIgnored) {
-                        Text(
-                            "已忽略",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                    } else {
-                        TextButton(onClick = { openBatterySettings(activity, context) }) {
-                            Text("去设置")
-                        }
-                    }
-                },
+                headlineContent = { Text("主题") },
+                supportingContent = { Text("桌面小组件同步跟随应用主题") },
             )
-
-            ListItem(
-                headlineContent = { Text("自启动 / 后台运行") },
-                supportingContent = { Text("小米、华为、OPPO、vivo 等机型还需手动允许") },
-                trailingContent = {
-                    TextButton(onClick = { showRomHelp = true }) { Text("查看") }
-                },
-            )
-
-            ListItem(
-                headlineContent = { Text("已排程提醒") },
-                supportingContent = {
-                    Text(
-                        if (scheduledInfo.count == 0) {
-                            "当前没有待提醒的条目"
-                        } else {
-                            buildString {
-                                append("共 ${scheduledInfo.count} 条")
-                                scheduledInfo.nextAt?.let {
-                                    append(" · 下一次 ")
-                                    append(it.format(NEXT_AT_FORMAT))
-                                }
-                            }
-                        }
-                    )
-                },
-            )
-
-            }
-
-            SettingsGroup(
-                title = "外观与交互",
-                summary = "浅色 / 深色主题、页面动效与离线语音",
-                expanded = "外观与交互" in expandedGroups,
-                onToggle = { toggleGroup("外观与交互") },
-            ) {
-                SubsectionLabel("主题")
-
-
-            // 横向单选项，三档并排一行，节省纵向空间
+            // 横向单选项，三档并排一行
             Row(
                 Modifier
                     .fillMaxWidth()
                     .selectableGroup()
-                    .padding(horizontal = 8.dp, vertical = 2.dp),
+                    .padding(horizontal = 16.dp, vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 for (mode in SettingsStore.ThemeMode.entries) {
@@ -448,21 +371,12 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        RadioButton(
-                            selected = themeMode == mode,
-                            onClick = null,
-                        )
+                        RadioButton(selected = themeMode == mode, onClick = null)
                         Spacer(Modifier.width(2.dp))
-                        Text(
-                            modeLabel(mode),
-                            style = MaterialTheme.typography.bodyMedium,
-                            maxLines = 1,
-                        )
+                        Text(modeLabel(mode), style = MaterialTheme.typography.bodyMedium, maxLines = 1)
                     }
                 }
             }
-
-                SubsectionLabel("页面")
 
             ListItem(
                 headlineContent = { Text("主页统计卡") },
@@ -474,51 +388,17 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
             )
 
             ListItem(
-                headlineContent = { Text("预测性返回动画") },
-                supportingContent = {
-                    Text(
-                        if (predictiveBackEnabled) "返回时页面跟手缩小，可预览回到桌面"
-                        else "已关闭，使用普通返回动画",
-                    )
-                },
+                headlineContent = { Text("刷新桌面小组件") },
+                supportingContent = { Text("主题或数据未及时更新时，可手动刷新一次") },
                 trailingContent = {
-                    Switch(
-                        checked = predictiveBackEnabled,
-                        onCheckedChange = { enabled ->
-                            settings.update(context, predictiveBackEnabled = enabled)
-                            scope.launch {
-                                snackbar.showSnackbar(if (enabled) "预测性返回已开启" else "预测性返回已关闭")
-                            }
-                        },
-                    )
+                    TextButton(onClick = {
+                        ExpiryWidgetBase.refreshAll(context)
+                        scope.launch { snackbar.showSnackbar("桌面小组件已刷新") }
+                    }) { Text("刷新") }
                 },
             )
 
-                SubsectionLabel("语音")
-
-            ListItem(
-                headlineContent = { Text("语音识别") },
-                supportingContent = {
-                    Text(
-                        if (VoiceInput.canUseSystem(context)) {
-                            "内置 Vosk 中文模型；系统语音也可用（离线优先）"
-                        } else {
-                            "内置 Vosk 中文模型，本机离线识别，音频不上传"
-                        },
-                    )
-                },
-            )
-
-            }
-
-            SettingsGroup(
-                title = "跨设备同步",
-                summary = "手动分享与同一 Wi-Fi 自动同步",
-                expanded = "跨设备同步" in expandedGroups,
-                onToggle = { toggleGroup("跨设备同步") },
-            ) {
-                SubsectionLabel("手动分享")
-
+            SettingsSection("跨设备同步")
 
             ListItem(
                 headlineContent = { Text("跨设备分享") },
@@ -528,14 +408,19 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
                 },
             )
 
-                SubsectionLabel("自动同步")
-
-
             ListItem(
                 headlineContent = { Text("自动同步") },
-                supportingContent = { Text("开启后同一 Wi-Fi 下的设备自动合并；共同唯一 ID + 修改时间新者覆盖，不再产生人工冲突") },
+                supportingContent = {
+                    Text(
+                        buildString {
+                            append(if (autoSyncEnabled) "已开启" else "已关闭")
+                            append(" · $syncStatus")
+                            if (pairedCount > 0) append(" · 已配对 $pairedCount 台")
+                        },
+                    )
+                },
                 trailingContent = {
-                    Switch(
+                    AppSwitch(
                         checked = autoSyncEnabled,
                         onCheckedChange = { enabled ->
                             settings.update(context, autoSyncEnabled = enabled)
@@ -551,7 +436,7 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
                 headlineContent = { Text("开机自动同步") },
                 supportingContent = { Text("开机后恢复 30 分钟一次的局域网同步排程") },
                 trailingContent = {
-                    Switch(
+                    AppSwitch(
                         checked = autoSyncOnBoot,
                         onCheckedChange = { enabled ->
                             settings.update(context, autoSyncOnBoot = enabled)
@@ -560,16 +445,6 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
                                 snackbar.showSnackbar(if (enabled) "开机同步已开启" else "开机同步已关闭")
                             }
                         },
-                    )
-                },
-            )
-
-            ListItem(
-                headlineContent = { Text("同步状态") },
-                supportingContent = {
-                    Text(
-                        if (pairedCount > 0) "$syncStatus · 已配对 $pairedCount 台"
-                        else syncStatus,
                     )
                 },
             )
@@ -604,63 +479,24 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
                 },
             )
 
-            }
-
-            SettingsGroup(
-                title = "桌面小组件",
-                summary = "到期列表、显示内容与主题跟随",
-                expanded = "桌面小组件" in expandedGroups,
-                onToggle = { toggleGroup("桌面小组件") },
-            ) {
-                SubsectionLabel("外观")
-
-
             ListItem(
-                headlineContent = { Text("跟随应用外观") },
+                headlineContent = { Text("已配对设备") },
                 supportingContent = {
-                    Text("浅色 / 深色主题由「外观与交互」统一控制，小组件自动切换卡片与文字颜色")
-                },
-                trailingContent = {
                     Text(
-                        when (themeMode) {
-                            SettingsStore.ThemeMode.light -> "浅色"
-                            SettingsStore.ThemeMode.dark -> "深色"
-                            else -> "跟随系统"
+                        if (pairedCount == 0) {
+                            "还没有配对设备；自动同步与安装包传输只与配对过的设备交换数据"
+                        } else {
+                            "$pairedCount 台设备可参与自动同步，点此可解除信任"
                         },
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary,
                     )
                 },
-            )
-
-            ListItem(
-                headlineContent = { Text("显示内容") },
-                supportingContent = {
-                    Text("分类色条、所在空间、添加日期、剩余天数与到期日期；点条目进编辑页")
-                },
-            )
-
-            ListItem(
-                headlineContent = { Text("刷新桌面卡片") },
-                supportingContent = { Text("主题或数据未及时更新时，可手动刷新一次") },
+                modifier = Modifier.clickable { showTrusted = true },
                 trailingContent = {
-                    TextButton(onClick = {
-                        ExpiryWidgetBase.refreshAll(context)
-                        scope.launch { snackbar.showSnackbar("桌面小组件已刷新") }
-                    }) { Text("刷新") }
+                    TextButton(onClick = { showTrusted = true }) { Text("管理") }
                 },
             )
 
-            }
-
-            SettingsGroup(
-                title = "数据与备份",
-                summary = "导出 / 导入备份与数据清理",
-                expanded = "数据与备份" in expandedGroups,
-                onToggle = { toggleGroup("数据与备份") },
-            ) {
-                SubsectionLabel("备份")
-
+            SettingsSection("数据与备份")
 
             ListItem(
                 headlineContent = { Text("导出备份") },
@@ -682,9 +518,6 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
                 },
             )
 
-                SubsectionLabel("数据")
-
-
             ListItem(
                 headlineContent = { Text("清空全部数据") },
                 supportingContent = { Text("删除所有物品与图片，不可恢复") },
@@ -695,14 +528,7 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
                 },
             )
 
-            }
-
-            SettingsGroup(
-                title = "关于",
-                summary = "版本与作者",
-                expanded = "关于" in expandedGroups,
-                onToggle = { toggleGroup("关于") },
-            ) {
+            SettingsSection("关于")
 
             ListItem(
                 headlineContent = { Text("到期提醒") },
@@ -715,8 +541,60 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
                     )
                 },
             )
-            }
+
+            ListItem(
+                headlineContent = { Text("GitHub 项目地址") },
+                supportingContent = { Text(GITHUB_URL.removePrefix("https://")) },
+                modifier = Modifier.clickable { openUrl(context, GITHUB_URL) },
+                trailingContent = {
+                    TextButton(onClick = { openUrl(context, GITHUB_URL) }) { Text("打开") }
+                },
+            )
         }
+    }
+
+    if (showTrusted) {
+        AlertDialog(
+            onDismissRequest = { showTrusted = false },
+            title = { Text("已配对设备") },
+            text = {
+                Column {
+                    if (trustedPeers.isEmpty()) {
+                        Text(
+                            "还没有配对设备。开启自动同步、或与另一台设备互传物品前，" +
+                                "先到「跨设备分享」里配对一次（双方屏幕上的 4 位码一致才会建立信任）。",
+                        )
+                    } else {
+                        Text("这些设备的请求会被接受；解除后需重新配对才能再次同步。")
+                        Spacer(Modifier.height(8.dp))
+                        trustedPeers.forEach { peer ->
+                            Row(
+                                Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(peer.name, style = MaterialTheme.typography.bodyLarge)
+                                    Text(
+                                        peer.id.take(12),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                TextButton(onClick = {
+                                    PeerTrust.revoke(context, peer.id)
+                                    trustedTick++
+                                }) {
+                                    Text("解除", color = MaterialTheme.colorScheme.error)
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showTrusted = false }) { Text("关闭") }
+            },
+        )
     }
 
     if (showStatCards) {
@@ -772,12 +650,11 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
 
     if (showTimePicker) {
         // 用自绘 Dialog 而不是 AlertDialog：滚轮中心行可以直接敲数字，
-        // 数字键盘弹起时需要 imePadding 把整块内容顶上去，AlertDialog 的默认窗口做不到
+        // 数字键盘弹起时需要 imePadding 把整块内容顶上去
         Dialog(
             onDismissRequest = { showTimePicker = false },
             properties = DialogProperties(
                 usePlatformDefaultWidth = false,
-                // 交给 Compose 自己处理 insets，否则窗口 resize 和 imePadding 会叠成双倍偏移
                 decorFitsSystemWindows = false,
             ),
         ) {
@@ -818,8 +695,7 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
                         ) {
                             TextButton(onClick = { showTimePicker = false }) { Text("取消") }
                             TextButton(onClick = {
-                                // 滚轮里可能正在输入（只敲了一位还没自动提交），
-                                // 先让它失焦把草稿交上来，等一帧再读，否则会存到旧值
+                                // 先让滚轮失焦把草稿交上来，等一帧再读，否则会存到旧值
                                 focusManager.clearFocus()
                                 scope.launch {
                                     withFrameNanos { }
@@ -861,126 +737,134 @@ fun SettingsScreen(onBack: () -> Unit, onTransfer: () -> Unit, onConflicts: () -
         )
     }
 
-    if (showLiveHelp) {
+    if (showLiveDetail) {
         AlertDialog(
-            onDismissRequest = { showLiveHelp = false },
-            title = { Text("流体云为什么没有出现") },
+            onDismissRequest = { showLiveDetail = false },
+            title = { Text("流体云提醒") },
             text = {
-                Text(
-                    "普通通知栏到期提醒与「流体云 / Android 实时动态」是两条链路。\n\n" +
-                        "本应用按 Android 16+ 规范发布 promoted ongoing 汇总通知。真机排查发现：" +
-                        "旧版用 CATEGORY_REMINDER 且默认 PRIVATE 可见性时，系统只记录请求、" +
-                        "不给 FLAG_PROMOTED_ONGOING；改为 CATEGORY_STATUS + VISIBILITY_PUBLIC +" +
-                        " 非彩色化后，真机已出现 PROMOTED_ONGOING 标记。\n\n" +
-                        "若状态仍是「未提升」，先点「去开启」确认系统里的实时活动开关，再点「重发」；" +
-                        "系统设置页里「实时活动会以流体云展示，不受通知设置的影响」需保持开启。" +
-                        "自定义模板/多端流体云卡片才需要 OPPO 泛在服务框架与企业白名单。",
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = { showLiveHelp = false }) { Text("知道了") }
-            },
-        )
-    }
-
-    if (showRomHelp) {
-        AlertDialog(
-            onDismissRequest = { showRomHelp = false },
-            title = { Text("允许后台运行") },
-            text = {
-                Text(
-                    "系统不允许自启动或强制清理后台时，任何应用都无法定时提醒。可按机型检查：\n\n" +
-                        "· 小米 / 红米：设置 → 应用设置 → 应用管理 → 到期提醒 → 自启动 + 省电策略「无限制」\n" +
-                        "· 华为 / 荣耀：设置 → 应用 → 应用启动管理 → 到期提醒 → 手动管理（全部打开）\n" +
-                        "· OPPO / 一加：设置 → 应用 → 自启动管理，耗电管理选「允许后台运行」\n" +
-                        "· vivo / iQOO：设置 → 应用与权限 → 自启动，后台耗电管理选「允许后台高耗电」\n\n" +
-                        "另外：在最近任务里「强行停止」应用会让系统清掉全部闹钟，" +
-                        "重新打开一次应用即可恢复。"
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = { showRomHelp = false }) { Text("知道了") }
-            },
-        )
-    }
-}
-
-/** 一级分类卡片：标题 + 概要 + 展开/收起，二级设置放在卡片内。 */
-@Composable
-private fun SettingsGroup(
-    title: String,
-    summary: String,
-    expanded: Boolean,
-    onToggle: () -> Unit,
-    content: @Composable ColumnScope.() -> Unit,
-) {
-    Surface(
-        shape = RoundedCornerShape(20.dp),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 1.dp,
-        border = androidx.compose.foundation.BorderStroke(
-            1.dp, MaterialTheme.colorScheme.outlineVariant,
-        ),
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp),
-    ) {
-        Column(Modifier.fillMaxWidth()) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .clickable(onClick = onToggle)
-                    .padding(horizontal = 14.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(
-                    Modifier
-                        .size(8.dp)
-                        .background(MaterialTheme.colorScheme.primary, CircleShape),
-                )
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
+                Column {
+                    Text("当前状态：$liveStatusText")
+                    Spacer(Modifier.height(8.dp))
                     Text(
-                        title,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                        "7 天内到期物品会合成一条常驻提醒；能否显示为流体云由系统决定。" +
+                            "普通到期通知与流体云是两条链路，互不影响。若状态未提升，" +
+                            "先确认系统里的实时活动开关，再点「重发」。",
+                        style = MaterialTheme.typography.bodyMedium,
                     )
+                }
+            },
+            confirmButton = {
+                Row {
+                    TextButton(onClick = { ReminderService.openLiveUpdateSettings(context) }) {
+                        Text("去开启")
+                    }
+                    TextButton(onClick = {
+                        ReminderService.repostLiveSummary(context, store, liveUpdateEnabled)
+                        reliabilityTick++
+                        scope.launch { snackbar.showSnackbar("已重新发布到期汇总") }
+                    }) { Text("重发") }
+                    TextButton(onClick = { showLiveDetail = false }) { Text("知道了") }
+                }
+            },
+        )
+    }
+
+    if (showReliabilityDetail) {
+        AlertDialog(
+            onDismissRequest = { showReliabilityDetail = false },
+            title = { Text("后台运行保障") },
+            text = {
+                Column {
+                    PermissionRow(
+                        title = "精确闹钟权限",
+                        description = if (exactGranted) "已授予，提醒可以准点触发" else "未授予，后台容易被推迟或丢掉",
+                        granted = exactGranted,
+                        grantedLabel = "已授予",
+                        actionLabel = "去授权",
+                        onAction = { openExactAlarmSettings(activity, context) },
+                    )
+                    PermissionRow(
+                        title = "忽略电池优化",
+                        description = if (batteryIgnored) "已忽略，系统不会因省电清理提醒" else "未忽略，部分机型会限制后台",
+                        granted = batteryIgnored,
+                        grantedLabel = "已忽略",
+                        actionLabel = "去设置",
+                        onAction = { openBatterySettings(activity, context) },
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     Text(
-                        summary,
+                        "自启动 / 后台运行还需按机型手动允许：\n" +
+                            "· 小米 / 红米：应用管理 → 到期提醒 → 自启动 + 省电策略「无限制」\n" +
+                            "· 华为 / 荣耀：应用启动管理 → 到期提醒 → 手动管理（全部打开）\n" +
+                            "· OPPO / 一加：自启动管理开启，耗电管理选「允许后台运行」\n" +
+                            "· vivo / iQOO：自启动开启，后台耗电选「允许后台高耗电」\n\n" +
+                            "在最近任务里「强行停止」会清掉全部闹钟，重新打开应用即可恢复。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Text(
-                    if (expanded) "收起" else "展开",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            }
-            if (expanded) {
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                Column(
-                    Modifier.padding(start = 8.dp, end = 8.dp, bottom = 6.dp),
-                    content = content,
-                )
-            }
+            },
+            confirmButton = {
+                TextButton(onClick = { showReliabilityDetail = false }) { Text("知道了") }
+            },
+        )
+    }
+}
+
+/** 对话框内的权限状态行：左侧标题+说明，右侧状态或操作按钮。 */
+@Composable
+private fun PermissionRow(
+    title: String,
+    description: String,
+    granted: Boolean,
+    grantedLabel: String,
+    actionLabel: String,
+    onAction: () -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        // 两侧保持完全相同的文字规格与内边距，仅点击行为不同，避免视觉基线错位
+        val actionModifier = Modifier
+            .clip(MaterialTheme.shapes.small)
+            .padding(horizontal = 8.dp, vertical = 8.dp)
+        if (granted) {
+            Text(
+                grantedLabel,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = actionModifier,
+            )
+        } else {
+            Text(
+                actionLabel,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = actionModifier.clickable(onClick = onAction),
+            )
         }
     }
 }
 
-/** 二级设置小标题：在分组卡片内再切一层，避免所有开关平铺。 */
+/** 平铺设置分组标题：只做视觉分节，不折叠、不点击。 */
 @Composable
-private fun SubsectionLabel(text: String) {
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .padding(start = 8.dp, end = 8.dp, top = 10.dp, bottom = 2.dp),
-    ) {
+private fun SettingsSection(title: String) {
+    Column(Modifier.fillMaxWidth().padding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 4.dp)) {
         Text(
-            text,
-            style = MaterialTheme.typography.labelMedium,
+            title,
+            style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.primary,
-            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+            fontWeight = FontWeight.SemiBold,
         )
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
     }
@@ -991,9 +875,6 @@ private fun modeLabel(mode: SettingsStore.ThemeMode): String = when (mode) {
     SettingsStore.ThemeMode.light -> "浅色"
     SettingsStore.ThemeMode.dark -> "深色"
 }
-
-/** 「下一次提醒」的展示格式。 */
-private val NEXT_AT_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("M月d日 HH:mm")
 
 /** 跳到系统的「闹钟和提醒」特殊权限页。 */
 private fun openExactAlarmSettings(activity: Activity?, context: Context) {
@@ -1014,3 +895,12 @@ private fun openBatterySettings(activity: Activity?, context: Context) {
     }
 }
 
+/** 关于页展示的项目主页。 */
+private const val GITHUB_URL = "https://github.com/nickynull/JExpiryReminder"
+
+/** 用浏览器打开外部链接；系统无浏览器时静默忽略。 */
+private fun openUrl(context: Context, url: String) {
+    runCatching {
+        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+    }
+}

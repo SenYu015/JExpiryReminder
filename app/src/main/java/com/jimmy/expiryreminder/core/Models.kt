@@ -341,6 +341,12 @@ data class ExpiryItem(
      * 自动同步会按业务键把双方收敛到同一个 syncId。
      */
     val syncId: String = "",
+    /**
+     * 循环任务：到期不代表物品消耗完，完成本次维护（充电/清理/添置等）后进入下一周期。
+     * 复用 productionDate 作为「上次完成日」、shelfLife + shelfLifeUnit 作为循环周期，
+     * expireAt 始终由这两项推导，不额外引入多个周期字段，旧数据缺字段按普通物品读取。
+     */
+    val repeatEnabled: Boolean = false,
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("id", id)
@@ -361,6 +367,7 @@ data class ExpiryItem(
         .put("updatedAt", updatedAt)
         .put("rev", rev)
         .put("syncId", syncId)
+        .put("repeatEnabled", repeatEnabled)
 
     companion object {
         fun fromJson(raw: Any?): ExpiryItem? {
@@ -402,6 +409,7 @@ data class ExpiryItem(
                 // 老版本没有修改标记：读到 0，首次落盘时统一补发
                 rev = raw.optLong("rev", 0L),
                 syncId = raw.optStringOrNull("syncId")?.trim().orEmpty(),
+                repeatEnabled = raw.optBoolean("repeatEnabled", false),
             )
         }
 
@@ -469,8 +477,9 @@ data class ExpiryData(
  *
  * 注：v9 在本分支同时承载「rev/revision 时钟」与「分类默认提醒」两项上游先后引入的语义，
  * 因 DATA_VERSION 仅作落盘标记、不参与读取分支判断，合并后统一记为 v11 以区别于两侧历史版本。
+ * v12 增加物品的 repeatEnabled 循环任务标记（旧数据缺字段按 false 读取，不改写历史数据）。
  */
-const val DATA_VERSION = 11
+const val DATA_VERSION = 12
 
 // ---------------------------------------------------------------- 状态
 
@@ -497,15 +506,44 @@ enum class ExpiryStatus { expired, soon, month, normal;
 // ---------------------------------------------------------------- 计算
 
 object ExpiryCalc {
-    /** 由生产日期 + 有效期推算到期日期，条件不足返回空串。 */
+    /**
+     * 由起始日期 + 有效期推算「最后一天有效」的到期日，条件不足返回空串。
+     *
+     * 有效期按含首尾的自然日计算：2026-11-10 生产、有效期 1 个月 → 2026-12-09。
+     * 整月/整年在月末收敛后再减一天（1 月 31 日 + 1 月 → 2 月 27 日）。
+     */
     fun computeExpireAt(productionDate: String, amount: Int, unit: ShelfLifeUnit): String {
-        if (!Dates.isValidISODate(productionDate) || amount <= 0) return ""
+        val start = Dates.parseISO(productionDate) ?: return ""
+        if (amount <= 0) return ""
         val span = floor(amount.toDouble()).toInt()
-        return if (unit == ShelfLifeUnit.day) {
-            Dates.addDays(productionDate, span)
+        val end = if (unit == ShelfLifeUnit.day) {
+            start.plusDays(span.toLong())
         } else {
-            Dates.addMonths(productionDate, if (unit == ShelfLifeUnit.year) span * 12 else span)
+            start.plusMonths((if (unit == ShelfLifeUnit.year) span * 12 else span).toLong())
         }
+        return Dates.toISODate(end.minusDays(1))
+    }
+
+    /**
+     * 循环物品完成本次后进入下一周期：以实际完成日为新起点，重新推导到期日，
+     * 并清空本周期的提醒记录，让新周期的同一档位能再次触发。
+     * 非循环物品或周期不合法时原样返回。
+     */
+    fun advanceCycle(
+        item: ExpiryItem,
+        today: java.time.LocalDate = java.time.LocalDate.now(),
+        updatedAt: String = Dates.nowIsoTimestamp(),
+    ): ExpiryItem {
+        if (!item.repeatEnabled || item.shelfLife <= 0) return item
+        val start = Dates.toISODate(today)
+        val nextExpire = computeExpireAt(start, item.shelfLife, item.shelfLifeUnit)
+        if (nextExpire.isEmpty()) return item
+        return item.copy(
+            productionDate = start,
+            expireAt = nextExpire,
+            notifiedKeys = emptyList(),
+            updatedAt = updatedAt,
+        )
     }
 
     /** FNV-1a：由去重键派生稳定的通知 id。 */

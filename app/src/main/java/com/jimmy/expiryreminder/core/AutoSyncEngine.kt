@@ -20,6 +20,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedInputStream
@@ -59,6 +61,8 @@ object AutoSyncEngine {
     private const val ALARM_INTERVAL_MS = 30 * 60 * 1000L
     private const val MAX_LINE = 4 * 1024 * 1024
     private const val NOTIFICATION_ID = 9001
+    /** 认证时间窗：超过这个偏差的请求直接拒绝，配合 nonce 去重挡重放。 */
+    private const val AUTH_WINDOW_MS = 120_000L
 
     /** 单轮最多拉多少张图、单张与单轮的总字节上限，避免一次同步把手机拖住。 */
     private const val MAX_IMAGE_FILES = 80
@@ -89,6 +93,8 @@ object AutoSyncEngine {
     private val resolveQueue = java.util.ArrayDeque<NsdServiceInfo>()
     private val resolving = AtomicBoolean(false)
     private val lastSyncAt = ConcurrentHashMap<String, Long>()
+    /** 最近见过的 (设备, nonce)，用于挡住重放；只保留时间窗内的条目。 */
+    private val recentNonces = ConcurrentHashMap<String, Long>()
 
     /** 由 Application 调用一次：跟随设置开关自动启停，并载入待合并冲突。 */
     @Synchronized
@@ -193,6 +199,7 @@ object AutoSyncEngine {
         synchronized(resolveQueue) { resolveQueue.clear() }
         resolving.set(false)
         lastSyncAt.clear()
+        recentNonces.clear()
         _peers.value = emptyList()
         _status.value = "未开启"
         appContext?.let { cancelAlarm(it) }
@@ -256,9 +263,10 @@ object AutoSyncEngine {
     }
 
     private fun CoroutineScope.acceptLoop(socket: ServerSocket, context: Context) {
+        val slots = Semaphore(4)
         while (isActive) {
             val client = runCatching { socket.accept() }.getOrNull() ?: break
-            launch { handleClient(client, context) }
+            launch { slots.withPermit { handleClient(client, context) } }
         }
     }
 
@@ -266,24 +274,38 @@ object AutoSyncEngine {
     private suspend fun handleClient(client: Socket, context: Context) {
         client.use { s ->
             s.soTimeout = 10_000
-            val line = BufferedReader(InputStreamReader(s.getInputStream(), Charsets.UTF_8))
-                .readLine() ?: return
-            if (line.length > MAX_LINE) return
+            val reader = BufferedReader(InputStreamReader(s.getInputStream(), Charsets.UTF_8))
+            // 边读边计数：BufferedReader.readLine() 会先把整行读进内存，超长行直接 OOM
+            val line = readLimitedLine(reader, MAX_LINE) ?: return
             val req = runCatching { JSONObject(line) }.getOrNull() ?: return
             if (req.optString("app") != APP) return
-            if (req.optString("cmd") == "imgs") {
-                sendImages(context, req, s)
+            val cmd = req.optString("cmd")
+            if (cmd != "sync" && cmd != "imgs") return
+            val peerId = req.optString("from")
+            val nonce = req.optString("nonce")
+            // 只认手动配对过的设备；没有密钥就不回任何数据（连错误细节都尽量少给）
+            val trust = PeerTrust.of(context, peerId)
+                ?: return reject(s, null, nonce, "未配对设备")
+            if (!authenticated(trust.secret, cmd, peerId, req)) {
+                return reject(s, trust.secret, nonce, "认证失败")
+            }
+            if (cmd == "imgs") {
+                sendImages(context, req, s, trust.secret)
                 return
             }
-            if (req.optString("cmd") != "sync") return
-            val peerId = req.optString("from")
-            val sinceRev = req.optLong("sinceRev", 0L)
-            val remote = parseItems(req.optJSONArray("items"))
-            val remoteMeta = MetaSnapshot.fromJson(req.optJSONObject("meta"))
-            val remoteImages = parseImageIndex(req.optJSONObject("imageIndex"))
-            val from = req.optString("name").ifBlank { peerId }
+            // 物品、分类/空间、图片索引都在加密载荷里：同网嗅探只能看到一条密文
+            val inbound = decBlob(trust.secret, req.optString("payload"))
+                ?: return reject(s, trust.secret, nonce, "载荷无法解密")
+            val sinceRev = inbound.optLong("sinceRev", 0L)
+            val remote = parseItems(inbound.optJSONArray("items"))
+            if (remote.size > TransferPayload.MAX_ITEMS) {
+                return reject(s, trust.secret, nonce, "物品数量异常")
+            }
+            val remoteMeta = MetaSnapshot.fromJson(inbound.optJSONObject("meta"))
+            val remoteImages = parseImageIndex(inbound.optJSONObject("imageIndex"))
+            val fromName = inbound.optString("name").ifBlank { peerId }
             // 分类/空间可能单独变化（物品没动），所以无条件走一次归并
-            applyRemote(context, remote, from.ifBlank { "另一台设备" }, remoteMeta, remoteImages)
+            applyRemote(context, remote, fromName.ifBlank { "另一台设备" }, remoteMeta, remoteImages)
             // 对方声称已收到我发出的 <= sinceRev 的记录；同时推进「我从对方收到的」水位
             if (peerId.isNotBlank()) {
                 SyncStateStore.update(
@@ -294,38 +316,116 @@ object AutoSyncEngine {
             }
             // 只回对方没见过的增量；两边都没改动时就是一次空握手，不写库
             val outgoing = ExpiryStore.get().itemsSince(sinceRev)
-            val resp = JSONObject()
-                .put("ok", true)
-                .put("from", deviceId(context))
+            val body = JSONObject()
                 .put("name", deviceName())
                 .put("items", itemsJson(outgoing))
                 .put("meta", localMeta().toJson())
                 .put("imageIndex", imageIndexJson())
                 .put("ackRev", SyncDelta.maxRev(remote))
                 .put("revNow", ExpiryStore.get().revision)
+            val resp = JSONObject()
+                .put("ok", true)
+                .put("from", deviceId(context))
+                .put("enc", "aes-gcm")
+                .put("payload", encBlob(trust.secret, body) ?: "")
+                .put("auth", Crypto.hmacHex(trust.secret, "resp|$nonce|true") ?: "")
             val writer = OutputStreamWriter(s.getOutputStream(), Charsets.UTF_8)
             writer.write(resp.toString() + "\n")
             writer.flush()
         }
     }
 
+    /** 载荷加密成 Base64；失败返回 null，由调用方按「拒绝」处理。 */
+    private fun encBlob(secret: String, json: JSONObject): String? {
+        val cipherText = Crypto.encrypt(secret, json.toString().toByteArray(Charsets.UTF_8)) ?: return null
+        return android.util.Base64.encodeToString(cipherText, android.util.Base64.NO_WRAP)
+    }
+
+    private fun decBlob(secret: String, text: String): JSONObject? {
+        if (text.isBlank()) return null
+        val blob = runCatching {
+            android.util.Base64.decode(text, android.util.Base64.NO_WRAP)
+        }.getOrNull() ?: return null
+        val plain = Crypto.decrypt(secret, blob) ?: return null
+        return runCatching { JSONObject(String(plain, Charsets.UTF_8)) }.getOrNull()
+    }
+
+    /** 限长读取一行，超长直接返回 null；不把整条超长行先读进内存。 */
+    private fun readLimitedLine(reader: java.io.Reader, max: Int): String? {
+        val sb = StringBuilder(1024)
+        while (true) {
+            val c = reader.read()
+            if (c < 0) return if (sb.isEmpty()) null else sb.toString()
+            if (c == '\n'.code) return sb.toString()
+            if (c == '\r'.code) continue
+            if (sb.length >= max) return null
+            sb.append(c.toChar())
+        }
+    }
+
+    /**
+     * 校验请求签名：`HMAC(secret, "cmd|from|nonce|ts")`。
+     * 时间窗挡旧包、nonce 去重挡重放，二者缺一都能让抓到的一次请求被反复提交。
+     */
+    private fun authenticated(secret: String, cmd: String, fromId: String, req: JSONObject): Boolean {
+        val nonce = req.optString("nonce")
+        val ts = req.optLong("ts", 0L)
+        if (nonce.length !in 16..64) return false
+        if (kotlin.math.abs(System.currentTimeMillis() - ts) > AUTH_WINDOW_MS) return false
+        val expect = Crypto.hmacHex(secret, "$cmd|$fromId|$nonce|$ts") ?: return false
+        if (!Crypto.constantTimeEquals(expect, req.optString("auth"))) return false
+        return acceptNonce(fromId, nonce)
+    }
+
+    private fun acceptNonce(fromId: String, nonce: String): Boolean {
+        val now = System.currentTimeMillis()
+        recentNonces.entries.removeAll { now - it.value > AUTH_WINDOW_MS }
+        return recentNonces.putIfAbsent("$fromId|$nonce", now) == null
+    }
+
+    /**
+     * 回一条拒绝。已知密钥时连拒绝也签名，客户端才能区分
+     * 「真设备的拒绝」与「冒名顶替者的拒绝」，避免把中间人当成对端。
+     */
+    private fun reject(socket: Socket, secret: String?, nonce: String, message: String) {
+        val body = JSONObject().put("ok", false).put("error", message)
+        if (!secret.isNullOrBlank() && nonce.isNotBlank()) {
+            Crypto.hmacHex(secret, "resp|$nonce|false")?.let { body.put("auth", it) }
+        }
+        runCatching {
+            val out = OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8)
+            out.write(body.toString() + "\n")
+            out.flush()
+        }
+    }
+
     private suspend fun tick(context: Context) {
         val list = _peers.value
         if (list.isEmpty()) return
+        var ok = 0
+        var unpaired = 0
+        var lastError: String? = null
         for (peer in list) {
+            // 未配对的设备既不读也不写：这是后台通道唯一的口子，必须显式授权过
+            if (PeerTrust.of(context, peer.id) == null) {
+                unpaired += 1
+                continue
+            }
             val last = lastSyncAt[peer.id] ?: 0L
             if (System.currentTimeMillis() - last < PEER_COOLDOWN_MS) continue
             lastSyncAt[peer.id] = System.currentTimeMillis()
-            val result = runCatching {
+            runCatching {
                 val remote = exchange(peer.host, peer.port, context, peer.id)
                 applyRemote(context, remote.items, peer.name, remote.meta, remote.imageIndex)
-                fetchMissingImages(context, peer.host, peer.port)
-            }
-            _status.value = if (result.isSuccess) {
-                "已开启 · ${timeNow()} 已同步 ${list.size} 台设备"
-            } else {
-                "同步失败：${result.exceptionOrNull()?.message ?: "连接不上"}"
-            }
+                fetchMissingImages(context, peer.host, peer.port, peer.id)
+            }.onSuccess { ok += 1 }.onFailure { lastError = it.message }
+        }
+        _status.value = when {
+            ok > 0 -> "已开启 · ${timeNow()} 已同步 $ok 台设备"
+            unpaired > 0 && unpaired == list.size ->
+                "已开启 · $unpaired 台设备未配对，先在「跨设备分享」里配对"
+            lastError != null -> "同步失败：$lastError"
+            else -> _status.value
         }
     }
 
@@ -339,60 +439,89 @@ object AutoSyncEngine {
         val list = _peers.value
         if (list.isEmpty()) return "暂未发现同一 Wi-Fi 下的设备（两台设备都要开启自动同步）"
         var ok = 0
+        var unpaired = 0
         var lastError: String? = null
         for (peer in list) {
+            if (PeerTrust.of(app, peer.id) == null) {
+                unpaired += 1
+                continue
+            }
             runCatching {
                 val remote = exchange(peer.host, peer.port, app, peer.id)
                 applyRemote(app, remote.items, peer.name, remote.meta, remote.imageIndex)
-                fetchMissingImages(app, peer.host, peer.port)
+                fetchMissingImages(app, peer.host, peer.port, peer.id)
             }.onSuccess {
                 ok++
                 lastSyncAt[peer.id] = System.currentTimeMillis()
             }.onFailure { lastError = it.message }
         }
-        val text = if (ok > 0) "已与 $ok 台设备同步" else "同步失败：${lastError ?: "连接不上"}"
+        val text = when {
+            ok > 0 -> "已与 $ok 台设备同步"
+            unpaired > 0 -> "发现 $unpaired 台未配对设备，请先在「跨设备分享」里配对"
+            else -> "同步失败：${lastError ?: "连接不上"}"
+        }
         _status.value = "已开启 · ${timeNow()} $text"
         return text
     }
 
     private suspend fun exchange(host: String, port: Int, context: Context, peerId: String): RemotePayload {
+        val trust = PeerTrust.of(context, peerId)
+            ?: error("未配对设备，请先在「跨设备分享」里配对")
+        val selfId = deviceId(context)
+        val nonce = Crypto.randomHex(16)
+        val stamp = System.currentTimeMillis()
+        val auth = Crypto.hmacHex(trust.secret, "sync|$selfId|$nonce|$stamp")
+            ?: error("本机信任密钥损坏，请重新配对")
         Socket().use { s ->
             s.connect(InetSocketAddress(host, port), 6_000)
             s.soTimeout = 12_000
             val state = SyncStateStore.peer(context, peerId)
             // 只发「对方还没确认收到」的变更；无变更时 items 为空
             val outgoing = ExpiryStore.get().itemsSince(state.sentRev)
-            val req = JSONObject()
-                .put("cmd", "sync")
-                .put("app", APP)
-                .put("schema", 4)
-                .put("from", deviceId(context))
+            val body = JSONObject()
                 .put("name", deviceName())
                 .put("sinceRev", state.recvRev)
                 .put("sentRev", state.sentRev)
                 .put("meta", localMeta().toJson())
                 .put("imageIndex", imageIndexJson())
                 .put("items", itemsJson(outgoing))
+            val req = JSONObject()
+                .put("cmd", "sync")
+                .put("app", APP)
+                .put("schema", 5)
+                .put("from", selfId)
+                .put("nonce", nonce)
+                .put("ts", stamp)
+                .put("auth", auth)
+                .put("enc", "aes-gcm")
+                .put("payload", encBlob(trust.secret, body) ?: error("载荷加密失败"))
             val writer = OutputStreamWriter(s.getOutputStream(), Charsets.UTF_8)
             writer.write(req.toString() + "\n")
             writer.flush()
             val line = BufferedReader(InputStreamReader(s.getInputStream(), Charsets.UTF_8))
-                .readLine() ?: error("对方没有返回数据")
-            if (line.length > MAX_LINE) error("返回数据过大")
+                .let { readLimitedLine(it, MAX_LINE) } ?: error("对方没有返回数据")
             val resp = JSONObject(line)
-            if (!resp.optBoolean("ok")) error(resp.optString("error").ifBlank { "对方拒绝了同步" })
-            val remote = parseItems(resp.optJSONArray("items"))
+            val respOk = resp.optBoolean("ok")
+            val expectAuth = Crypto.hmacHex(trust.secret, "resp|$nonce|$respOk")
+            if (!Crypto.constantTimeEquals(expectAuth, resp.optString("auth"))) {
+                error("对方身份校验失败，请重新配对")
+            }
+            if (!respOk) error(resp.optString("error").ifBlank { "对方拒绝了同步" })
+            val inbound = decBlob(trust.secret, resp.optString("payload"))
+                ?: error("返回数据无法解密，请重新配对")
+            val remote = parseItems(inbound.optJSONArray("items"))
+            if (remote.size > TransferPayload.MAX_ITEMS) error("对端物品数量异常")
             SyncStateStore.update(
                 context, peerId,
                 recvMax = SyncDelta.maxRev(remote),
-                sentMax = resp.optLong("ackRev", 0L),
+                sentMax = inbound.optLong("ackRev", 0L),
             )
             // 把本机时钟抬到对方水位，保证之后本机编辑的 rev 一定更大
-            ExpiryStore.get().observeRemoteClock(context, resp.optLong("revNow", 0L))
+            ExpiryStore.get().observeRemoteClock(context, inbound.optLong("revNow", 0L))
             return RemotePayload(
                 items = remote,
-                meta = MetaSnapshot.fromJson(resp.optJSONObject("meta")),
-                imageIndex = parseImageIndex(resp.optJSONObject("imageIndex")),
+                meta = MetaSnapshot.fromJson(inbound.optJSONObject("meta")),
+                imageIndex = parseImageIndex(inbound.optJSONObject("imageIndex")),
             )
         }
     }
@@ -503,7 +632,8 @@ object AutoSyncEngine {
     }
 
     /** 把本机缺的图片文件从对端拉回来；单轮有条数/字节上限。 */
-    private fun fetchMissingImages(context: Context, host: String, port: Int) {
+    private fun fetchMissingImages(context: Context, host: String, port: Int, peerId: String) {
+        val trust = PeerTrust.of(context, peerId) ?: return
         val missing = LinkedHashSet<String>()
         for (item in ExpiryStore.get().items) {
             for (image in item.images) {
@@ -516,6 +646,11 @@ object AutoSyncEngine {
         }
         if (missing.isEmpty()) return
 
+        val selfId = deviceId(context)
+        val nonce = Crypto.randomHex(16)
+        val stamp = System.currentTimeMillis()
+        val auth = Crypto.hmacHex(trust.secret, "imgs|$selfId|$nonce|$stamp") ?: return
+
         runCatching {
             Socket().use { s ->
                 s.connect(InetSocketAddress(host, port), 6_000)
@@ -524,29 +659,41 @@ object AutoSyncEngine {
                 TransferWire.writeMessage(
                     out,
                     JSONObject().put("cmd", "imgs").put("app", APP)
+                        .put("from", selfId)
+                        .put("nonce", nonce)
+                        .put("ts", stamp)
+                        .put("auth", auth)
                         .put("paths", JSONArray(missing.toList())),
                 )
                 val input = BufferedInputStream(s.getInputStream())
                 var total = 0L
                 while (true) {
                     val line = TransferWire.readLine(input) ?: break
+                    // 头部只是路径与长度，超过这个尺寸的一定不是正常对端
+                    if (line.length > 4 * 1024) break
                     val header = runCatching { JSONObject(line) }.getOrNull() ?: break
                     if (header.optBoolean("done")) break
                     if (!header.optBoolean("ok")) continue
                     val path = normalizeImagePath(header.optString("path"))
                     val size = header.optLong("size", 0L)
+                    // 只接受加密帧：旧协议的明文图片一律不落盘
+                    if (header.optString("enc") != "aes-gcm") break
                     if (path.isEmpty() || !path.startsWith("images/") ||
-                        size <= 0 || size > MAX_IMAGE_BYTES
+                        size <= 0 || size > MAX_IMAGE_BYTES + 1024
                     ) {
                         break
                     }
                     if (total + size > MAX_IMAGE_TOTAL) break
+                    val buffer = java.io.ByteArrayOutputStream(size.toInt().coerceAtMost(8 * 1024 * 1024))
+                    TransferWire.copyExactly(input, buffer, size)
+                    val plain = Crypto.decrypt(trust.secret, buffer.toByteArray()) ?: break
+                    if (plain.size > MAX_IMAGE_BYTES) break
                     val file = ImageStore.imageFile(context, path)
                     file.parentFile?.mkdirs()
                     val tmp = File(file.parentFile, file.name + ".part")
                     try {
-                        tmp.outputStream().use { TransferWire.copyExactly(input, it, size) }
-                        if (tmp.renameTo(file)) total += size else tmp.delete()
+                        tmp.outputStream().use { it.write(plain) }
+                        if (tmp.renameTo(file)) total += plain.size else tmp.delete()
                     } catch (e: Exception) {
                         tmp.delete()
                         throw e
@@ -556,12 +703,14 @@ object AutoSyncEngine {
         }
     }
 
-    /** 对端来取图：逐个路径回「header + 原始字节」，最后一条 done。 */
-    private fun sendImages(context: Context, req: JSONObject, socket: Socket) {
+    /** 对端来取图：逐个路径回「header + 加密字节」，最后一条 done。 */
+    private fun sendImages(context: Context, req: JSONObject, socket: Socket, secret: String) {
         val out = BufferedOutputStream(socket.getOutputStream())
         val paths = req.optJSONArray("paths") ?: JSONArray()
         var sent = 0
-        for (i in 0 until paths.length()) {
+        // 单次请求的路径数也要封顶：否则一条请求就能让本机连续读几十次磁盘
+        val limit = minOf(paths.length(), MAX_IMAGE_FILES)
+        for (i in 0 until limit) {
             val raw = paths.optString(i)
             val safe = normalizeImagePath(raw)
             if (safe.isEmpty() || !safe.startsWith("images/")) {
@@ -577,10 +726,17 @@ object AutoSyncEngine {
                 )
                 continue
             }
+            val rawBytes = runCatching { file.readBytes() }.getOrNull() ?: continue
+            // 图片常含发票/证件/家庭照，只在加密后出网卡
+            val encrypted = Crypto.encrypt(secret, rawBytes) ?: continue
             TransferWire.writeMessage(
-                out, JSONObject().put("ok", true).put("path", safe).put("size", file.length()),
+                out,
+                JSONObject().put("ok", true)
+                    .put("path", safe)
+                    .put("size", encrypted.size)
+                    .put("enc", "aes-gcm"),
             )
-            file.inputStream().use { TransferWire.copyExactly(it, out, file.length()) }
+            out.write(encrypted)
             out.flush()
             sent++
         }
