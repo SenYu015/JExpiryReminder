@@ -233,6 +233,12 @@ abstract class ExpiryWidgetBase : AppWidgetProvider() {
                     val mgr = AppWidgetManager.getInstance(context)
                     for (id in selfIds) updateOne(context, mgr, id, target)
                     refreshAll(context, forcedMode = target)
+                    // ColorOS 启动器对带 setRemoteAdapter 的 RemoteViews 偶发延迟应用：
+                    // 列表（notify 通道）秒切、头部高亮要等下一次系统刷新才追上。
+                    // 延迟补一刀全量刷新，把头部在亚秒级顶出来。
+                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                        refreshAll(context)
+                    }, 800)
                 }
             }
         }
@@ -301,6 +307,9 @@ abstract class ExpiryWidgetBase : AppWidgetProvider() {
         // adapter URI 固定为实例级（不按模式拆分）：ColorOS 启动器对 URI 变更不重建连接，
         // 按模式拆分会让旧模式的残留工厂与新模式工厂互相覆盖列表（「闪一下又弹回」）；
         // 模式由 Factory 每次 onDataSetChanged 动态读 WidgetPrefs，天然与 Provider 一致。
+        // 注意：每次都必须携带 setRemoteAdapter——实测 ColorOS 上一次不带 setRemoteAdapter
+        // 的更新会把列表的 RemoteViewsService 连接丢掉且不再恢复（列表永久冻结在旧行，
+        // notifyAppWidgetViewDataChanged 也被吞），所以「仅首次绑定」的优化不可用。
         val adapter = Intent(context, ExpiryWidgetService::class.java).apply {
             putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, id)
             data = Uri.parse("jexpiry://widget/$id")
@@ -360,6 +369,7 @@ abstract class ExpiryWidgetBase : AppWidgetProvider() {
     companion object {
         /** 应用内数据变化时发的私有刷新广播，不对外暴露。 */
         const val ACTION_REFRESH = "com.jimmy.expiryreminder.action.WIDGET_REFRESH"
+
         /** 点椭圆标签切换列表的私有广播（无界面、不带起应用）。 */
         const val ACTION_TOGGLE = "com.jimmy.expiryreminder.action.WIDGET_TOGGLE"
         /** 切换中转 Activity 读取：要切到的目标列表模式。 */
