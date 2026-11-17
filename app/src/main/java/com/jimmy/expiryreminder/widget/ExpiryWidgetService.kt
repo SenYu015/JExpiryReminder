@@ -2,7 +2,6 @@ package com.jimmy.expiryreminder.widget
 
 import android.content.Context
 import android.content.Intent
-import android.graphics.Color
 import android.text.SpannableString
 import android.text.style.ForegroundColorSpan
 import android.text.style.RelativeSizeSpan
@@ -44,9 +43,10 @@ class ExpiryWidgetService : RemoteViewsService() {
             val dark = WidgetTheme.isDark(context)
             val palette = WidgetTheme.palette(dark)
 
-            // 类型标注拼进名字文本：紧贴名字尾部（Span 着色 + 缩小），不会飘到行中间
+            // 类型标注拼进名字文本：紧贴名字尾部（Span 着色 + 缩小），不会飘到行中间；
+            // 颜色与头部「循环」标签同源（palette.accent），两处永远一致
             val mark = if (item.repeatEnabled) "循环" else "倒计时"
-            val markColor = if (item.repeatEnabled) Color.parseColor("#E6A23C") else palette.muted
+            val markColor = if (item.repeatEnabled) palette.accent else palette.muted
             val nameText = SpannableString("${item.name}  $mark")
             nameText.setSpan(
                 ForegroundColorSpan(markColor),

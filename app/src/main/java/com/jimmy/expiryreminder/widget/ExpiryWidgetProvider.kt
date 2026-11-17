@@ -188,13 +188,13 @@ abstract class ExpiryWidgetBase : AppWidgetProvider() {
         val dark = WidgetTheme.isDark(context)
         val palette = WidgetTheme.palette(dark)
 
-        // 头部两个计数分开显示：N 倒计时 / M 循环
+        // 头部两个计数分开显示：N 倒计时 / M 循环；「循环」标签用主色，与行内标注一致
         views.setTextViewText(R.id.widget_count_countdown, snapshot.countdownCount.toString())
         views.setTextColor(R.id.widget_count_countdown, palette.title)
         views.setTextColor(R.id.widget_label_countdown, palette.muted)
         views.setTextViewText(R.id.widget_count_cycle, snapshot.cycleCount.toString())
         views.setTextColor(R.id.widget_count_cycle, palette.title)
-        views.setTextColor(R.id.widget_label_cycle, palette.muted)
+        views.setTextColor(R.id.widget_label_cycle, palette.accent)
 
         views.setTextColor(R.id.widget_empty, palette.muted)
         views.setOnClickPendingIntent(R.id.widget_add, addPendingIntent(context))

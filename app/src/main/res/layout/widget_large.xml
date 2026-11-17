@@ -74,7 +74,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginStart="4dp"
                     android:text="循环"
-                    android:textColor="#909399"
+                    android:textColor="#E6A23C"
                     android:textSize="12sp" />
             </LinearLayout>
 
