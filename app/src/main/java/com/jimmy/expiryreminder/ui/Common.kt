@@ -2,9 +2,8 @@ package com.jimmy.expiryreminder.ui
 
 import android.graphics.BitmapFactory
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -44,6 +43,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
@@ -328,93 +328,125 @@ private fun InputBoxShell(
 }
 
 /**
- * 全站统一的磨砂浮起胶囊：柔投影 + 高不透明面板色 + 一圈亮边。
+ * 全站「浮起面板」底：半透明面板 + 柔投影 + 一条能看清边界的立体描边。
  *
- * 与首页/编辑页原有实现同思路：不用 `Surface(color=半透明, shadowElevation)`
- * （M3 会把容器色当阴影底板画成矩形，从圆角外透出白块），改用 `Modifier.shadow`
- * 显式中性阴影色 + 单独背景层 + 亮边，`clip=false` 让投影四周都留出来。
- * 面板色用 0.97 高不透明，避免浮在列表上时把下方文字透上来（看起来像没浮起来）。
+ * 透明度：默认 0.95，按钮背后的内容只剩极淡的轮廓，按钮文字干净可读；
+ * 需要承载数字/正文的地方（统计卡）由调用方传更高的 [fillAlpha] 保对比度。
+ *
+ * 描边为什么用渐变而不是白色亮边：白亮边落在浅色背景上等于没有边界。这里整圈走
+ * outlineVariant 灰线（上 0.62 → 中 0.82 → 底 0.95），四边都看得见；靠深浅差异做厚度，
+ * 上边略浅、下边最深，面板仍然是「压」在内容上的感觉。再配合 [Modifier.shadow] 起浮。
+ *
+ * 为什么不直接用 `Surface(color = 半透明, shadowElevation = x)`：
+ * M3 的 Surface 会把容器色当作阴影底板一起画，颜色带 alpha 时这块底板就从圆角外
+ * 透出一片**白色矩形**（统计卡、分类行、底部控件都中过招）。这里改成
+ * `Modifier.shadow` 显式给一组中性阴影色，再单独叠背景层和描边，绕开这个问题。
+ *
+ * 末尾的 [Modifier.clip] 让水波纹和子内容都收在圆角里，阴影因为 `clip = false` 不被切掉。
  */
 @Composable
 internal fun Modifier.frostedPanel(
     shape: Shape = RoundedCornerShape(18.dp),
     elevation: Dp = 12.dp,
     fill: Color = MaterialTheme.colorScheme.surface,
-    borderColor: Color = Color.White.copy(alpha = 0.55f),
-    borderWidth: Dp = 0.8.dp,
-): Modifier = this
-    .shadow(
-        elevation = elevation,
-        shape = shape,
-        clip = false,
-        ambientColor = Color(0x14000000),
-        spotColor = Color(0x33000000),
+    fillAlpha: Float = 0.95f,
+    borderColor: Color? = null,
+    borderWidth: Dp = 1.2.dp,
+): Modifier {
+    val outline = MaterialTheme.colorScheme.outlineVariant
+    // 传了 borderColor 就整圈单色（多选态的警示红），否则用上亮下暗的立体渐变。
+    // 中段和底部都压得很深：容器全透之后，这条灰线是区分按钮边界的唯一依靠。
+    val edge: Brush = borderColor?.let { color ->
+        Brush.verticalGradient(
+            0f to color.copy(alpha = 0.55f),
+            1f to color,
+        )
+    } ?: Brush.verticalGradient(
+        // 上边界也必须是能看见的细线：之前这里用纯白高光，落在浅色背景上等于没有边界，
+        // 按钮顶部完全糊在页面里（用户反馈「按钮上边界无法辨认」）。
+        // 整圈都用 outlineVariant，只靠深浅做立体：上浅 → 中深 → 底最深。
+        0f to outline.copy(alpha = 0.62f),
+        0.45f to outline.copy(alpha = 0.82f),
+        1f to outline.copy(alpha = 0.95f),
     )
-    .background(fill.copy(alpha = 0.97f), shape)
-    .border(borderWidth, borderColor, shape)
-    .clip(shape)
+    return this
+        .shadow(
+            elevation = elevation,
+            shape = shape,
+            clip = false,
+            ambientColor = Color(0x14000000),
+            // 主阴影略收、方向明确：面板浮起来的同时底缘不会糊成一片灰
+            spotColor = Color(0x2B000000),
+        )
+        .background(fill.copy(alpha = fillAlpha), shape)
+        .border(borderWidth, edge, shape)
+        .clip(shape)
+}
 
 /**
- * 全站统一的开关（ColorOS 风格）：胶囊轨道 + 圆形滑块。
+ * 统一开关样式（自绘，不直接用 Material3 的 Switch）。
  *
- * - 关闭：轨道浅灰、灰圆停左侧；
- * - 打开：轨道浅蓝、蓝圆停右侧。
+ * 不用原生 Switch 的两个原因：
+ * 1. 关闭态默认 thumb = outline、track = surfaceContainerHighest，而本项目这两个中性色
+ *    几乎同色（#E1E6ED / #E3E6EA），圆点会整个融进轨道、看起来只剩一个灰胶囊；
+ * 2. 原生 thumb 尺寸随状态变化（选中 24dp / 未选中 16dp），拨动时圆点会「变大变小」，
+ *    这里固定 24dp，两态视觉完全一致。
  *
- * 圆点本身带颜色与轻投影，位置与配色都用动画过渡。用于设置页与编辑页，
- * 取代 Material3 默认 Switch（默认滑块是白色，与整体蓝灰配色不统一）。
+ * 尺寸沿用 M3 的比例：轨道 52×32dp、圆点直径 24dp、圆点四周留 4dp。
  */
 @Composable
 internal fun AppSwitch(
     checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
+    onCheckedChange: ((Boolean) -> Unit)?,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
 ) {
-    val track by animateColorAsState(
-        targetValue = if (checked) MaterialTheme.colorScheme.primaryContainer
-        else MaterialTheme.colorScheme.surfaceContainerHighest,
-        label = "switchTrack",
+    val trackWidth = 52.dp
+    val trackHeight = 32.dp
+    val thumbSize = 24.dp
+    // 圆点在轨道内的上下留白，也是左右两端的起始留白
+    val thumbPadding = 4.dp
+    val animatedOffset by animateDpAsState(
+        targetValue = if (checked) trackWidth - thumbSize - thumbPadding else thumbPadding,
+        animationSpec = tween(durationMillis = 180),
+        label = "switchThumbOffset",
     )
-    val knob by animateColorAsState(
-        targetValue = if (checked) MaterialTheme.colorScheme.primary
-        else MaterialTheme.colorScheme.outline,
-        label = "switchKnob",
+    val trackColor by animateColorAsState(
+        targetValue = if (checked) {
+            MaterialTheme.colorScheme.primary
+        } else {
+            MaterialTheme.colorScheme.surfaceContainerHighest
+        },
+        animationSpec = tween(durationMillis = 180),
+        label = "switchTrackColor",
     )
-    // animateDpAsState 在该 BOM 组合下不可解析，改用 Animatable<Float> 驱动位移
-    val knobProgress = remember { Animatable(if (checked) 1f else 0f) }
-    LaunchedEffect(checked) {
-        knobProgress.animateTo(
-            targetValue = if (checked) 1f else 0f,
-            animationSpec = spring(
-                dampingRatio = Spring.DampingRatioNoBouncy,
-                stiffness = Spring.StiffnessMedium,
-            ),
-        )
-    }
-    val knobX = (20f * knobProgress.value).dp
-    val height = 32.dp
-    val knobSize = 28.dp
+
     Box(
         modifier
-            .size(width = 52.dp, height = height)
-            .clip(RoundedCornerShape(height / 2))
-            .background(track)
-            .toggleable(
-                value = checked,
-                enabled = enabled,
-                role = Role.Switch,
-                onValueChange = onCheckedChange,
-            )
-            .padding(2.dp),
+            .size(trackWidth, trackHeight)
+            .clip(CircleShape)
+            .background(if (enabled) trackColor else trackColor.copy(alpha = 0.5f))
+            .then(
+                if (onCheckedChange != null) {
+                    Modifier.toggleable(
+                        value = checked,
+                        enabled = enabled,
+                        role = Role.Switch,
+                        onValueChange = onCheckedChange,
+                    )
+                } else {
+                    Modifier
+                },
+            ),
         contentAlignment = Alignment.CenterStart,
     ) {
         Box(
             Modifier
-                .offset(x = knobX)
-                .size(knobSize)
-                .shadow(2.dp, CircleShape, clip = false)
-                .clip(CircleShape)
-                .background(knob),
+                .offset(x = animatedOffset)
+                .size(thumbSize)
+                // 一点阴影，让白点在浅灰轨道上更「实」
+                .shadow(elevation = 1.dp, shape = CircleShape, clip = false)
+                .background(Color.White.copy(alpha = if (enabled) 1f else 0.6f), CircleShape),
         )
     }
 }

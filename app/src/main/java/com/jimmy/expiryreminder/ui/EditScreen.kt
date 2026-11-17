@@ -2218,24 +2218,12 @@ private fun StepCell(symbol: String, enabled: Boolean, onClick: () -> Unit) {
 }
 
 /**
- * 主页查询框同款「磨砂浮起」胶囊：柔投影 + 半透明面板色 + 一圈亮边。
- *
- * 与 HomeScreen 的 frostedPanel 同思路：不用 `Surface(color = 半透明, shadowElevation)`
- * （M3 会把容器色当阴影底板画成矩形），改用 `Modifier.shadow` 显式中性阴影色，
- * 且 `clip = false` 让投影四周边都留出来，保存按钮因此有立体感。
+ * 保存/取消按钮的「磨砂浮起」胶囊：柔投影 + 半透明面板色 + 立体描边。
+ * 统一走 Common.kt 的 frostedPanel（阴影色、描边渐变与全站一致），elevation 沿用 14dp。
  */
 @Composable
-private fun Modifier.frostedPill(shape: Shape): Modifier = this
-    .shadow(
-        elevation = 14.dp,
-        shape = shape,
-        clip = false,
-        ambientColor = Color(0x1F000000),
-        spotColor = Color(0x38000000),
-    )
-    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.97f), shape)
-    .border(0.8.dp, Color.White.copy(alpha = 0.55f), shape)
-    .clip(shape)
+private fun Modifier.frostedPill(shape: Shape): Modifier =
+    this.frostedPanel(shape = shape, elevation = 14.dp)
 
 /** 虚线描边修饰符（native Canvas 实现，Compose 官方 border 不支持 dash）。 */
 private fun Modifier.dashedBorder(color: Color, cornerRadius: Dp): Modifier = drawBehind {    val paint = android.graphics.Paint().apply {

@@ -28,7 +28,6 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -67,8 +66,6 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -85,6 +82,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -106,10 +104,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChangeIgnoreConsumed
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
@@ -136,7 +136,7 @@ import kotlin.math.abs
 private val SINGLE_LINE_WS = Regex("\\s+")
 
 /**
- * 首页筛选状态（搜索词 + 分类 + 空间）：由导航层持有，进出编辑页后回来仍保留。
+ * 首页筛选状态（搜索词 + 分类 + 空间 + 列表模式）：由导航层持有，进出编辑页后回来仍保留。
  * 用 listSaver 存字符串，进程被回收再恢复也不丢。
  */
 @Stable
@@ -144,22 +144,29 @@ class HomeFilterState(
     keyword: String = "",
     category: String = "all",
     space: String = Spaces.ALL,
+    listMode: String = MODE_COUNTDOWN,
 ) {
     var keyword by mutableStateOf(keyword)
     var category by mutableStateOf(category)
     /** 当前空间：列表、统计卡、分类计数都按它过滤；默认「全部空间」，含未分配。 */
     var space by mutableStateOf(space)
+    /** 当前列表：倒计时（普通物品）/ 循环任务，按 repeatEnabled 区分；默认倒计时。 */
+    var listMode by mutableStateOf(listMode)
 
     companion object {
         const val ALL = "all"
+        const val MODE_COUNTDOWN = "countdown"
+        const val MODE_CYCLE = "cycle"
 
         val Saver = listSaver<HomeFilterState, String>(
-            save = { listOf(it.keyword, it.category, it.space) },
+            save = { listOf(it.keyword, it.category, it.space, it.listMode) },
             restore = {
                 HomeFilterState(
                     keyword = it.getOrElse(0) { "" },
                     category = it.getOrElse(1) { ALL },
                     space = it.getOrElse(2) { Spaces.ALL },
+                    // 旧存档没有第 4 项，回落到倒计时，保证升级后不空白
+                    listMode = it.getOrElse(3) { MODE_COUNTDOWN },
                 )
             },
         )
@@ -261,12 +268,20 @@ fun HomeScreen(
             kw.isEmpty() || item.name.lowercase().contains(kw) || item.note.lowercase().contains(kw)
         }
     }
-    val categoryCounts = remember(keywordMatched) {
-        keywordMatched.groupingBy { it.category }.eachCount()
+    // 列表模式分流：倒计时 = 非循环物品，循环任务 = repeatEnabled。
+    // 列表、统计卡、分类计数、全选都以 modeMatched 为同一口径——切到哪个列表就只看哪一类。
+    val isCycleMode = filter.listMode == HomeFilterState.MODE_CYCLE
+    val modeMatched = remember(keywordMatched, isCycleMode) {
+        keywordMatched.filter { it.repeatEnabled == isCycleMode }
     }
-    val filtered = remember(keywordMatched, filter.category) {
-        if (filter.category == HomeFilterState.ALL) keywordMatched
-        else keywordMatched.filter { it.category == filter.category }
+    val cycleCount = remember(spaceItems) { spaceItems.count { it.repeatEnabled } }
+    val countdownCount = remember(spaceItems) { spaceItems.count { !it.repeatEnabled } }
+    val categoryCounts = remember(modeMatched) {
+        modeMatched.groupingBy { it.category }.eachCount()
+    }
+    val filtered = remember(modeMatched, filter.category) {
+        if (filter.category == HomeFilterState.ALL) modeMatched
+        else modeMatched.filter { it.category == filter.category }
     }
     val grouped = remember(filtered) {
         // 按状态固定顺序输出非空分组
@@ -276,10 +291,11 @@ fun HomeScreen(
     val categoryLabel = if (filter.category == HomeFilterState.ALL) "全部分类"
     else store.categoryOptions().firstOrNull { it.id == filter.category }?.label ?: "全部分类"
 
-    // 可左右切换的分类环 =「全部分类」+ 当前空间下至少有一条未归档记录的分类。
-    // 空分类不进环，滑动不会切出一片空白；这里刻意不跟搜索词联动，避免搜索时环忽长忽短。
-    val switchableIds = remember(spaceItems) {
-        val counts = spaceItems.groupingBy { it.category }.eachCount()
+    // 可左右切换的分类环 =「全部分类」+ 当前列表下至少有一条记录的分类。
+    // 空分类不进环，滑动不会切出一片空白；这里刻意不跟搜索词联动，避免搜索时环忽长忽短，
+    // 但跟随列表模式——切到循环任务后，环里只保留循环任务实际用到的分类。
+    val switchableIds = remember(modeMatched) {
+        val counts = modeMatched.groupingBy { it.category }.eachCount()
         buildList {
             add(HomeFilterState.ALL)
             store.categoryOptions().forEach { if ((counts[it.id] ?: 0) > 0) add(it.id) }
@@ -294,9 +310,9 @@ fun HomeScreen(
     val slideShiftPx = with(LocalDensity.current) { 64.dp.toPx() }
     // 首次进页面不播动画（否则一进来列表就滑一下）
     var firstComposition by remember { mutableStateOf(true) }
-    // 每换一次分类就新建一个从 ±1 起跳的 Animatable：起始偏移在组合期就位，
+    // 每换一次分类或列表模式就新建一个从 ±1 起跳的 Animatable：起始偏移在组合期就位，
     // 不会出现「先按最终位置画一帧、再跳回去滑进来」的闪一下
-    val slide = remember(filter.category) {
+    val slide = remember(filter.category, filter.listMode) {
         Animatable(if (firstComposition) 0f else slideDir.toFloat())
     }
     LaunchedEffect(slide) {
@@ -326,12 +342,35 @@ fun HomeScreen(
         filter.category = id
     }
 
-    // 真的换了分类才回顶部；从编辑页返回时保留原来的滚动位置
+    // 列表模式切换：倒计时 → 循环任务从右滑进，反之从左滑进。
+    // 切过去后当前分类如果在新列表里没有记录，回落到「全部分类」，避免切出一片空白；
+    // 同时退出多选，防止把另一类物品带进批量操作。
+    val switchListMode: (String) -> Unit = { mode ->
+        if (mode != filter.listMode) {
+            slideDir = if (mode == HomeFilterState.MODE_CYCLE) 1 else -1
+            filter.listMode = mode
+            if (selectMode) {
+                selectMode = false
+                selected = emptySet()
+            }
+            // 这里 listMode 刚更新、modeMatched 还是旧组合的缓存，
+            // 故直接按新模式从 spaceItems 判断当前分类是否还有记录
+            val nextIsCycle = mode == HomeFilterState.MODE_CYCLE
+            if (filter.category != HomeFilterState.ALL &&
+                spaceItems.none { it.repeatEnabled == nextIsCycle && it.category == filter.category }
+            ) {
+                filter.category = HomeFilterState.ALL
+            }
+        }
+    }
+
+    // 真的换了分类或列表模式才回顶部；从编辑页返回时保留原来的滚动位置
     val listState = rememberLazyListState()
-    var scrolledCategory by remember { mutableStateOf(filter.category) }
-    LaunchedEffect(filter.category) {
-        if (scrolledCategory != filter.category) {
-            scrolledCategory = filter.category
+    var scrolledKey by remember { mutableStateOf(filter.category + "|" + filter.listMode) }
+    val currentScrollKey = filter.category + "|" + filter.listMode
+    LaunchedEffect(currentScrollKey) {
+        if (scrolledKey != currentScrollKey) {
+            scrolledKey = currentScrollKey
             if (filtered.isNotEmpty()) listState.scrollToItem(0)
         }
     }
@@ -350,6 +389,8 @@ fun HomeScreen(
     val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     var topBarHeightPx by remember { mutableIntStateOf(0) }
+    // 分类行顶边：遮罩只铺到这里，分类行整条保持全透，底下滚过的卡片能透出来
+    var catRowTopPx by remember { mutableIntStateOf(0) }
     // 遮罩强度只跟滚动距离有关：滚到顶 0（完全透明，露出干净底色），往下 28dp 内就升满。
     // 上升区间必须短——内容刚进入遮罩时如果遮罩还是半透明，标题就会和背后的列表文字重影；
     // 一旦升满，真正的淡出交给遮罩自身的竖渐变（底部全透明）去完成。
@@ -363,18 +404,17 @@ fun HomeScreen(
         }
     }
     val frostColor = MaterialTheme.colorScheme.background
-    // 遮罩向下多铺一小段（24dp）露出淡出带：列表第一条正好从这段之后开始，
-    // 静止时不会被压白，滚动时卡片就是在这 24dp 里由清晰过渡到消失
-    val maskTail = 12.dp
-    // 内容让位：固定块 + 淡出带；底部留出浮动条高度（都以实测为准，换字号也不会错位）
+    // 列表内容让位的余量：静止时第一条卡片离分类行底边留 16dp，不会贴着按钮。
+    val maskTail = 16.dp
+    // 内容让位：固定块 + 余量；底部留出浮动条高度（都以实测为准，换字号也不会错位）
     val topContentPadding = if (topBarHeightPx > 0) {
         with(density) { topBarHeightPx.toDp() } + maskTail
     } else {
         statusTop + 92.dp + maskTail
     }
-    // 底部浮动条高度是固定 dp（54/52/58 取最高 + 上下 12dp 内边距），不随字号变化，
-    // 所以直接算常量，省一次测量回调；再留 24dp 余量，最后一条不会贴到按钮上
-    val bottomContentPadding = if (selectMode) 16.dp else navBottom + 94.dp
+    // 底部浮动条高度是固定 dp（28dp 上内边距（含 16dp 渐隐带）+ 56dp 按钮 + 12dp 下内边距 = 96dp），
+    // 不随字号变化，所以直接算常量，省一次测量回调；再留 16dp 余量，最后一条不会贴到按钮上
+    val bottomContentPadding = if (selectMode) 16.dp else navBottom + 112.dp
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -405,8 +445,13 @@ fun HomeScreen(
                 .fillMaxSize(),
         ) {
             // ---------------------------------------------- 整页一个滚动容器
-            // 只有列表在这条 LazyColumn 里滚；标题、统计卡、分类行都是上方固定块，
-            // 列表滚到固定块下面时被遮罩逐级淡出。
+            // 只有列表在这条 LazyColumn 里滚；标题、统计卡、分类行都是上方固定块。
+            // 这块列表同时是毛玻璃的「取景源」：标题带和下面每颗玻璃按钮都从这里抓像素做模糊。
+            //
+            // 外层按分类 + 列表模式 key：切换时整块列表节点连同它内部的 item 动画器一起重建。
+            // 不这样做的话，旧行会在 animateItem 的消失动画里被动画器继续持有并绘制，
+            // 新分类的卡片只盖住大部分，卡片之间的空隙里会露出上一屏的行（表现为「残留」）。
+            key(filter.category, filter.listMode) {
             LazyColumn(
                 Modifier
                     .fillMaxSize()
@@ -450,13 +495,15 @@ fun HomeScreen(
                                 }
                                 Spacer(Modifier.height(12.dp))
                                 Text(
-                                    if (state.loaded) "暂无物品" else "加载中…",
+                                    if (!state.loaded) "加载中…"
+                                    else if (isCycleMode) "暂无循环任务" else "暂无倒计时物品",
                                     style = MaterialTheme.typography.titleMedium,
                                 )
                                 if (state.loaded) {
                                     Spacer(Modifier.height(4.dp))
                                     Text(
-                                        "点底部 + 添加第一件物品",
+                                        if (isCycleMode) "点底部 + 添加，并在编辑页打开「循环任务」"
+                                        else "点底部 + 添加第一件物品",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
@@ -492,8 +539,10 @@ fun HomeScreen(
                         }
                         items(items.size, key = { items[it].id }) { index ->
                             val item = items[index]
-                            // 新增/删除/移动时条目自带位移动画，接近流体动效的连续感
-                            Box(Modifier.animateItem()) {
+                            // 新增/删除/移动时条目自带位移动画，接近流体动效的连续感。
+                            // 但不要淡出：切分类时整批行会同时消失，消失动画会让旧行在
+                            // 卡片之间的空隙里多留一会儿（表现为上一屏的行「残留」）
+                            Box(Modifier.animateItem(fadeOutSpec = null)) {
                                 ItemRow(
                                     item = item,
                                     store = store,
@@ -534,10 +583,15 @@ fun HomeScreen(
                     }
                 }
             }
+            } // key(filter.category, filter.listMode)
 
             // ---------------------------------------------- 顶部固定遮罩（渐变淡出）
-            // 固定在页面顶部，本身是一条贯穿的竖向渐变：顶端不透明，向下逐级变淡，
-            // 到遮罩底缘完全透明。内容滚进来时被逐级「吃掉」，是连续淡出而不是撞上一条边界。
+            // 固定在页面顶部：实心部分盖住标题与统计卡（挡住滚上来的卡片）。
+            // 淡出带只允许出现在「统计卡底 → 分类行顶」那条空隙里——
+            // 分类行这一整条容器必须完全透明（用户要求，勿回退）：
+            // 按钮背后不许有任何遮罩/底色，透出来的是清晰的卡片，
+            // 边界只靠按钮自己的立体描边 + 投影区分。
+            // 不用第三方模糊库——稳定和兼容优先，卡片在这里被实色「吃掉」而不是被模糊。
             Column(
                 Modifier
                     .align(Alignment.TopCenter)
@@ -546,27 +600,22 @@ fun HomeScreen(
                     .drawBehind {
                         val a = frostAlpha()
                         if (a <= 0f) return@drawBehind
-                        // 固定块高度 = 遮罩的实心主体；再向下多铺 maskTail 做过渡带，
-                        // 淡化全在过渡带里完成，固定块里的文字始终压在足够实的底上，读得清。
-                        val total = size.height + maskTail.toPx()
-                        // 一条从遮罩底缘往上连续变实的曲线（smoothstep）：底缘全透明，
-                        // 约 120dp 内平滑收满，再往上保持不透明。
-                        // 不用「实心段 + 16dp 突然淡出」的硬分段，也不会让中段太透、
-                        // 把固定块后面的列表卡片透出来。
-                        fun ss(x: Float): Float = x * x * (3f - 2f * x)
-                        // 渐变带高度：固定块下缘 40dp + 向下多铺的 12dp，
-                        // 上方的统计卡、副标题保持全实，不会透出背后的列表
-                        val fadePx = 52.dp.toPx()
-                        val frac = (fadePx / total).coerceIn(0.05f, 1f)
+                        // 统计栏下边界的透明过渡：从统计卡底边开始一路淡到固定块底边（分类行底边）归零。
+                        // 注意区分两件事：分类行 Row 自身没有任何底色/不透明度（容器是透明的），
+                        // 这里画的是父层遮罩的渐隐——滚上来的卡片在分类行区域里被逐渐吃掉，
+                        // 而不是整条清晰穿过、和按钮文字互相叠字。
+                        val body = if (catRowTopPx > 0) catRowTopPx.toFloat() else size.height
+                        val total = size.height.coerceAtLeast(1f)
+                        val solidEnd = (body / total).coerceIn(0.02f, 1f)
+                        val tailFrac = 1f - solidEnd
                         drawRect(
                             brush = Brush.verticalGradient(
-                                *(0..8).map { i ->
-                                    val t = i / 8f              // 0 = 遮罩顶部，1 = 遮罩底缘
-                                    val u = 1f - t              // 距底缘的比例
-                                    t to frostColor.copy(
-                                        alpha = a * ss((u / frac).coerceIn(0f, 1f)),
-                                    )
-                                }.toTypedArray()
+                                0f to frostColor.copy(alpha = a),
+                                solidEnd to frostColor.copy(alpha = a),
+                                // 按钮区上半段就先掉到三成：文字不会再和按钮标题叠在一起；
+                                // 到分类行底边归零，过渡是连续的
+                                (solidEnd + tailFrac * 0.5f) to frostColor.copy(alpha = a * 0.30f),
+                                1f to frostColor.copy(alpha = 0f),
                             ),
                             size = Size(size.width, total),
                         )
@@ -628,20 +677,19 @@ fun HomeScreen(
                                 )
                                 // 标题块与右侧按钮组之间留固定呼吸位，标题长短都不挤在一起
                                 Spacer(Modifier.width(12.dp))
-                                // 空间切换：当前空间名 + 下拉（同时是空间管理的入口）
+                                // 空间切换：当前空间名 + 下拉（同时是空间管理的入口）。
+                                // 与分类行三颗按钮同款毛玻璃：同一屏里只保留一种按钮语言。
                                 Box {
-                                    Surface(
-                                        onClick = { spaceMenuOpen = true },
-                                        shape = RoundedCornerShape(20.dp),
-                                        color = MaterialTheme.colorScheme.surface,
-                                        shadowElevation = 2.dp,
-                                        border = androidx.compose.foundation.BorderStroke(
-                                            1.dp, MaterialTheme.colorScheme.outlineVariant,
-                                        ),
-                                        modifier = Modifier.height(40.dp),
+                                    Box(
+                                        Modifier
+                                            .height(40.dp)
+                                            .frostedPanel()
+                                            .clickable { spaceMenuOpen = true },
                                     ) {
                                         Row(
-                                            Modifier.padding(horizontal = 12.dp),
+                                            Modifier
+                                                .fillMaxHeight()
+                                                .padding(horizontal = 12.dp),
                                             verticalAlignment = Alignment.CenterVertically,
                                         ) {
                                             Box(
@@ -758,24 +806,19 @@ fun HomeScreen(
                                 }
                                 // 与「全部空间」胶囊之间留 10dp：两颗都是 40dp 高，视觉上成组但不相连
                                 Spacer(Modifier.width(10.dp))
-                                Surface(
-                                    onClick = onSettings,
-                                    shape = CircleShape,
-                                    color = MaterialTheme.colorScheme.surface,
-                                    shadowElevation = 2.dp,
-                                    border = androidx.compose.foundation.BorderStroke(
-                                        1.dp, MaterialTheme.colorScheme.outlineVariant,
-                                    ),
-                                    modifier = Modifier.size(40.dp),
+                                Box(
+                                    Modifier
+                                        .size(40.dp)
+                                        .frostedPanel(shape = CircleShape)
+                                        .clickable(onClick = onSettings),
+                                    contentAlignment = Alignment.Center,
                                 ) {
-                                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                        Icon(
-                                            Icons.Filled.Settings,
-                                            contentDescription = "设置",
-                                            tint = MaterialTheme.colorScheme.onSurface,
-                                            modifier = Modifier.size(20.dp),
-                                        )
-                                    }
+                                    Icon(
+                                        Icons.Filled.Settings,
+                                        contentDescription = "设置",
+                                        tint = MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.size(20.dp),
+                                    )
                                 }
                             }
                             Spacer(Modifier.height(6.dp))
@@ -810,12 +853,30 @@ fun HomeScreen(
                     }
                 }
 
+                // ------------------------------------------ 列表模式切换：倒计时 / 循环任务
+                ListModeSwitcher(
+                    mode = filter.listMode,
+                    countdownCount = countdownCount,
+                    cycleCount = cycleCount,
+                    onChange = switchListMode,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 16.dp, end = 16.dp, top = 12.dp),
+                )
 
                 // ------------------------------------------ 分类切换器 + 分类/多选
+                // 这一整行容器完全透明（用户要求，勿回退）：顶部遮罩的淡出带
+                // 只允许出现在它上方那条空隙里，容器内不许有任何遮罩/底色。
+                // 三颗按钮各自是半透明面板，边界靠描边与投影区分。
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .padding(start = 16.dp, end = 16.dp, top = 14.dp),
+                        .onGloballyPositioned {
+                            // 相对外层固定块的位置：遮罩实心部分到这一行顶边为止，
+                            // 这一行容器内部零遮罩（透明由按钮自身面板负责）
+                            catRowTopPx = it.positionInParent().y.toInt()
+                        }
+                        .padding(start = 16.dp, end = 16.dp, top = CategoryRowTopPadding),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -922,11 +983,8 @@ fun HomeScreen(
                     Box(
                         Modifier
                             .frostedPanel(
-                                borderColor = if (selectMode) {
-                                    MaterialTheme.colorScheme.error
-                                } else {
-                                    Color.White.copy(alpha = 0.55f)
-                                },
+                                // 多选态用红色描边提示「再点一次退出」；平时走默认立体渐变边
+                                borderColor = if (selectMode) MaterialTheme.colorScheme.error else null,
                             )
                             .clickable {
                                 if (selectMode) {
@@ -1082,10 +1140,91 @@ fun HomeScreen(
 
 // frostedPanel 已提取到 Common.kt 作为全站公共 modifier，首页/编辑页/分类页/空间页共用同一套
 
+/**
+ * 分类行 Row 的顶部内边距，同时是顶部遮罩淡出带的高度：
+ * 淡出必须完全发生在「统计卡底 → 分类行顶」这条空隙里，一点不许侵进分类行容器。
+ * 两处共用一个常量，改一处必须同步另一处。
+ */
+private val CategoryRowTopPadding = 14.dp
+
 private fun countOf(
     grouped: List<Pair<ExpiryStatus, List<ExpiryItem>>>,
     status: ExpiryStatus,
 ): Int = grouped.firstOrNull { it.first == status }?.second?.size ?: 0
+
+/**
+ * 列表模式切换器：一条磨砂胶囊里两等分「倒计时 / 循环任务」，各自带当前空间的条数。
+ * 选中段用主色淡底 + 主色粗字 + 底部指示条，未选中段透明；与分类行同一套 frostedPanel 风格。
+ */
+@Composable
+private fun ListModeSwitcher(
+    mode: String,
+    countdownCount: Int,
+    cycleCount: Int,
+    onChange: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val indicator = @Composable { active: Boolean ->
+        Box(
+            Modifier
+                .height(3.dp)
+                .width(24.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(
+                    if (active) MaterialTheme.colorScheme.primary else Color.Transparent,
+                ),
+        )
+    }
+    Row(
+        modifier
+            .fillMaxWidth()
+            .frostedPanel()
+            .padding(3.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        val tabs = listOf(
+            Triple(HomeFilterState.MODE_COUNTDOWN, "倒计时", countdownCount),
+            Triple(HomeFilterState.MODE_CYCLE, "循环任务", cycleCount),
+        )
+        tabs.forEach { (modeKey, label, count) ->
+            val active = mode == modeKey
+            Column(
+                Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(15.dp))
+                    .background(
+                        if (active) MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
+                        else Color.Transparent,
+                    )
+                    .clickable { onChange(modeKey) }
+                    .padding(vertical = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        label,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                        color = if (active) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        "$count",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (active) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+                indicator(active)
+            }
+        }
+    }
+}
 
 /**
  * 底部浮动操作区：搜索胶囊 + 独立拍照圆钮 + 绿色新增圆钮。
@@ -1205,7 +1344,7 @@ private fun HomeFloatingBar(
     }
 }
 
-/** 浮动圆钮：磨砂底 + 阴影 + 圆形裁切，尺寸、阴影、亮边由调用方定。 */
+/** 浮动圆钮：磨砂底 + 阴影 + 立体描边 + 圆形裁切，尺寸、阴影由调用方定。 */
 @Composable
 private fun FloatCircleButton(
     size: Dp,
@@ -1213,7 +1352,7 @@ private fun FloatCircleButton(
     elevation: Dp,
     description: String,
     onClick: () -> Unit,
-    borderColor: Color = Color.White.copy(alpha = 0.55f),
+    borderColor: Color? = null,
     content: @Composable () -> Unit,
 ) {
     Box(
@@ -1297,7 +1436,7 @@ private fun CountBadge(count: Int) {
     )
 }
 
-/** 参考稿统计卡：白底、左对齐彩色大数字 + 灰色标签。[dense] 用于 4 张以上时收窄，避免一行放不下。 */
+/** 参考稿统计卡：白底、居中彩色大数字 + 灰色标签。[dense] 用于 4 张以上时收窄，避免一行放不下。 */
 @Composable
 private fun StatCard(
     count: Int,
@@ -1306,13 +1445,16 @@ private fun StatCard(
     dense: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
-    // 与搜索框、分类行同一套磨砂浮起效果：半透明白底 + 白色亮边 + 柔投影
-    Box(modifier.frostedPanel()) {
+    // 与搜索框、分类行同一套磨砂浮起效果：半透明面板 + 立体描边 + 柔投影。
+    // 统计卡要放大数字，透太多会掉可读性，所以面板压得更实（0.92）
+    Box(modifier.frostedPanel(fillAlpha = 0.92f)) {
         Column(
-            Modifier.padding(
-                horizontal = if (dense) 8.dp else 14.dp,
-                vertical = if (dense) 10.dp else 12.dp,
-            )
+            Modifier
+                .fillMaxWidth()
+                .padding(
+                    horizontal = if (dense) 8.dp else 14.dp,
+                    vertical = if (dense) 10.dp else 12.dp,
+                )
         ) {
             Text(
                 "$count",
@@ -1321,6 +1463,8 @@ private fun StatCard(
                 fontWeight = FontWeight.Bold,
                 color = accent,
                 maxLines = 1,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(2.dp))
             Text(
@@ -1328,6 +1472,8 @@ private fun StatCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
             )
         }
     }
@@ -1356,27 +1502,54 @@ private fun ItemRow(
     // 圆角必须与缩略图一致（8dp），否则缩回终点形状不符会闪一下。
     val thumbRadiusPx = with(LocalDensity.current) { 8.dp.toPx() }
     var thumbOrigin by remember { mutableStateOf<ImageOrigin?>(null) }
+    val rowScope = rememberCoroutineScope()
+    // confirmValueChange 已在 material3 1.4 弃用：改用 SwipeToDismissBox 的 onDismiss 回调，
+    // 沉降后由 onDismiss 里 reset() 弹回原位
     val dismissState = rememberSwipeToDismissBoxState(
-        confirmValueChange = { value ->
-            if (value == SwipeToDismissBoxValue.EndToStart && !selectMode) {
-                onSwipeDelete()
-            }
-            // 无论确认与否都弹回原位，删除交给对话框
-            false
-        },
         positionalThreshold = { it * 0.5f },
     )
+
+    // 卡片圆角：色条内缩量、红底裁切都用它，避免三处各写一个数字后对不齐
+    val cardShape = RoundedCornerShape(24.dp)
+    // 左滑删除红底的显隐：静止时必须完全不画，只有真的在拖（或回弹动画中）才画。
+    // 注意不能用 dismissState.progress —— 它算的是「currentValue → targetValue 的过渡比例」，
+    // current 与 target 相等（静止在 Settled）时 AnchoredDraggable 的 progress 直接返回 1f，
+    // 并不是 0f。把它当透明度就等于红底常驻、满不透明地铺在卡片正下方，全靠卡片自己盖住；
+    // 而卡片圆角是抗锯齿的，盖不严，四个角和底边就会渗出一圈红边。
+    // offset 是 internal，取不到；dismissDirection 公开且只在位移为 0 时是 Settled，
+    // 正好当「是否在拖」用，而且它和 alpha 一样在绘制阶段读，拖动时不触发重组。
+    val redAlpha: () -> Float = {
+        val dragging = runCatching {
+            dismissState.dismissDirection != SwipeToDismissBoxValue.Settled
+        }.getOrDefault(false)
+        if (dragging) 1f else 0f
+    }
 
     SwipeToDismissBox(
         state = dismissState,
         enableDismissFromStartToEnd = false,
         // 多选态下整行都是「点选」区域，禁止左滑，避免露出删除红底
         enableDismissFromEndToStart = !selectMode,
+        onDismiss = { direction ->
+            if (direction == SwipeToDismissBoxValue.EndToStart && !selectMode) {
+                onSwipeDelete()
+            }
+            // 无论是否触发删除都弹回原位，删除交给对话框确认
+            rowScope.launch { dismissState.reset() }
+        },
         backgroundContent = {
             // 多选态不画删除底色：卡片选中色是半透明的，红底会透上来变成一片红
             if (!selectMode) {
                 Box(
-                    Modifier.fillMaxSize().background(MaterialTheme.colorScheme.error, RoundedCornerShape(24.dp)),
+                    Modifier
+                        .fillMaxSize()
+                        // 红底比卡片内缩 2dp：卡片圆角是抗锯齿边缘，两者严丝合缝对齐时
+                        // 下层总会渗出 1px 红边，内缩后红底的圆角完全落在卡片圆角以内。
+                        .padding(2.dp)
+                        .clip(cardShape)
+                        .background(MaterialTheme.colorScheme.error)
+                        // alpha 在绘制阶段才读，拖动时不触发重组；静止时是 0，一个像素都不画
+                        .graphicsLayer { alpha = redAlpha() },
                     contentAlignment = Alignment.CenterEnd,
                 ) {
                     Icon(
@@ -1387,41 +1560,56 @@ private fun ItemRow(
             }
         },
     ) {
-        Card(
-            shape = RoundedCornerShape(24.dp),
-            modifier = Modifier
+        // 不用 Card 的 1dp elevation：那层阴影在 Android 上会聚成一条紧贴卡片的深灰硬线，
+        // 配上 24dp 大圆角看着像「边框没画完」。这里换成和统计卡、分类行同源的柔阴影。
+        Box(
+            Modifier
                 .fillMaxWidth()
+                .shadow(
+                    elevation = 10.dp,
+                    shape = cardShape,
+                    clip = false,
+                    ambientColor = Color(0x12000000),
+                    spotColor = Color(0x26000000),
+                )
+                .background(
+                    // 选中色要和底色混成不透明色，否则会透出后面的内容
+                    if (selected) {
+                        androidx.compose.ui.graphics.lerp(
+                            MaterialTheme.colorScheme.surface,
+                            MaterialTheme.colorScheme.primary,
+                            0.10f,
+                        )
+                    } else {
+                        MaterialTheme.colorScheme.surface
+                    },
+                    cardShape,
+                )
+                .clip(cardShape)
                 .combinedClickable(onClick = onClick, onLongClick = onLongClick),
-            colors = CardDefaults.cardColors(
-                // 选中色要和底色混成不透明色，否则会透出后面的内容
-                containerColor = if (selected) {
-                    androidx.compose.ui.graphics.lerp(
-                        MaterialTheme.colorScheme.surface,
-                        MaterialTheme.colorScheme.primary,
-                        0.10f,
-                    )
-                } else {
-                    MaterialTheme.colorScheme.surface
-                },
-            ),
-            // 参考通知中心：干净的大圆角白卡，去掉四周描边与彩色角落
-            elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
         ) {
             Row(
-                Modifier.height(IntrinsicSize.Min),
+                Modifier
+                    // 分类色条：长度对齐卡片左边框的「直线段」——上下各缩一个圆角半径，
+                    // 正好落在左右两段圆弧的起止点之间；卡片特别矮时保底 24dp，色条不会被挤没。
+                    // 直接 drawBehind 画，不参与布局：行高由内容自然决定，不再需要
+                    // IntrinsicSize.Min + fillMaxHeight 那一套（省掉一次内建测量）。
+                    .drawBehind {
+                        val barColor = hexColor(store.categoryColorOf(item.category))
+                        val minBar = 24.dp.toPx()
+                        val inset = ((size.height - minBar) / 2f)
+                            .coerceIn(0f, 24.dp.toPx())
+                        drawRoundRect(
+                            color = barColor,
+                            topLeft = Offset(8.dp.toPx(), inset),
+                            size = Size(4.dp.toPx(), (size.height - inset * 2).coerceAtLeast(0f)),
+                            cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx()),
+                        )
+                    },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                // 分类色条：固定 34dp 的短条，垂直居中；不再跟着行高拉长
-                Box(
-                    Modifier
-                        .padding(start = 8.dp)
-                        .width(4.dp)
-                        .height(34.dp)
-                        .background(
-                            hexColor(store.categoryColorOf(item.category)),
-                            RoundedCornerShape(2.dp),
-                        ),
-                )
+                // 原来「8dp 内缩 + 4dp 色条」占的 12dp：色条改由 drawBehind 画，这里只留空位
+                Spacer(Modifier.width(12.dp))
                 Row(
                     Modifier.weight(1f).padding(horizontal = 12.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
