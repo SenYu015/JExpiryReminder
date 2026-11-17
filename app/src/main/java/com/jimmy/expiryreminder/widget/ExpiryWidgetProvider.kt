@@ -144,19 +144,14 @@ object WidgetData {
 /**
  * 桌面小组件基类：标准 Android AppWidget（ColorOS 万能卡片/原子组件按此协议适配）。
  *
- * 列表用固定槽位的静态行而非 RemoteViews ListView——实测 ColorOS 启动器：
- * 1) 含 setRemoteAdapter 的更新会在 system_server 层挂起（MSG_NOTIFY_UPDATE_APP_WIDGET_DEFERRED），
- *    要等宿主视图重新布局（翻页/周期广播）才落地；
- * 2) 不含 setRemoteAdapter 的更新立即应用，但会丢弃列表的 RemoteViewsService 连接；
- * 3) 对「文本不变、仅 setTextColor 变色」的动作不重绘。
- * 静态行让每次更新都是「无 adapter」的即时应用，头部与行内容同帧切换。
+ * 列表用可滚动的 ListView（RemoteViewsService 提供）。历史教训（勿回退）：
+ * adapter intent 的 data URI 必须固定为实例级（不按内容/模式拆分），否则部分启动器
+ * （ColorOS）不重建连接，会留下残留工厂互相覆盖列表；工厂每次 onDataSetChanged
+ * 动态读数据快照，连接复用也总能拿到最新内容。
  */
 abstract class ExpiryWidgetBase : AppWidgetProvider() {
 
     protected abstract val layoutRes: Int
-
-    /** 各行槽的控件 id（root/bar/name/mode/added/days/expire）。 */
-    protected abstract val rowIds: List<RowIds>
 
     override fun onUpdate(
         context: Context,
@@ -212,49 +207,32 @@ abstract class ExpiryWidgetBase : AppWidgetProvider() {
         views.setInt(R.id.widget_scrim, "setBackgroundColor", palette.card)
         views.setViewVisibility(R.id.widget_bg_image, android.view.View.GONE)
 
-        // 静态行槽：混排内容直接写入，不足或为空时隐藏对应槽位
-        val rows = snapshot.rows.take(rowIds.size)
         views.setViewVisibility(
             R.id.widget_empty,
-            if (rows.isEmpty()) android.view.View.VISIBLE else android.view.View.GONE,
+            if (snapshot.rows.isEmpty()) android.view.View.VISIBLE else android.view.View.GONE,
         )
-        rowIds.forEachIndexed { index, ids ->
-            val row = rows.getOrNull(index)
-            if (row == null) {
-                views.setViewVisibility(ids.root, android.view.View.GONE)
-            } else {
-                views.setViewVisibility(ids.root, android.view.View.VISIBLE)
-                views.setTextViewText(ids.name, row.name)
-                // 行内标注类型：循环任务用主色，倒计时用弱化色
-                views.setTextViewText(ids.mode, if (row.repeatEnabled) "循环" else "倒计时")
-                views.setTextColor(
-                    ids.mode,
-                    if (row.repeatEnabled) Color.parseColor("#E6A23C") else palette.muted,
-                )
-                views.setTextViewText(ids.days, row.daysText)
-                views.setTextViewText(ids.expire, row.expireText)
-                views.setTextViewText(ids.added, row.subText)
-                views.setTextColor(ids.name, palette.name)
-                views.setTextColor(ids.expire, palette.muted)
-                views.setTextColor(ids.added, palette.muted)
-                views.setTextColor(ids.days, row.statusColor)
-                views.setInt(ids.bar, "setColorFilter", row.barColor)
-                views.setInt(ids.root, "setBackgroundResource", row.rowBg)
-                views.setOnClickPendingIntent(ids.root, itemClickPendingIntent(context, row.id))
-            }
+
+        // adapter URI 固定为实例级（不按内容拆分），工厂动态读快照，杜绝残留工厂竞态
+        val adapter = Intent(context, ExpiryWidgetService::class.java).apply {
+            putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, id)
+            data = Uri.parse("jexpiry://widget/$id")
         }
+        views.setRemoteAdapter(R.id.widget_list, adapter)
+        views.setEmptyView(R.id.widget_list, R.id.widget_empty)
+        views.setPendingIntentTemplate(R.id.widget_list, listTemplate(context))
+
         mgr.updateAppWidget(id, views)
+        mgr.notifyAppWidgetViewDataChanged(id, R.id.widget_list)
     }
 
-    /** 行点击：带物品 id 打开编辑页；data URI 保证每个物品的 PendingIntent 互不覆盖。 */
-    private fun itemClickPendingIntent(context: Context, itemId: String): PendingIntent =
+    /** 行点击模板：fillInIntent 由 Factory 带物品 id，打开后直接进编辑页。 */
+    private fun listTemplate(context: Context): PendingIntent =
         PendingIntent.getActivity(
-            context, 0,
-            Intent(context, MainActivity::class.java)
-                .putExtra(MainActivity.EXTRA_OPEN_ITEM_ID, itemId)
-                .setData(Uri.parse("jexpiry://item/$itemId"))
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            context, 1,
+            Intent(context, MainActivity::class.java).addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP,
+            ),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
         )
 
     /** 右上角「+」：清空任务栈重开，直接落到新增页。 */
@@ -299,86 +277,19 @@ abstract class ExpiryWidgetBase : AppWidgetProvider() {
             }
         }
     }
-
-    /** 一行槽位的控件 id 集合。 */
-    data class RowIds(
-        val root: Int,
-        val bar: Int,
-        val name: Int,
-        val mode: Int,
-        val added: Int,
-        val days: Int,
-        val expire: Int,
-    )
 }
 
-/** 2×2 紧凑：只显示最紧急的几条。 */
+/** 2×2 紧凑：只显示最紧急的几条，列表可滚动。 */
 class ExpiryWidgetSmall : ExpiryWidgetBase() {
     override val layoutRes: Int = R.layout.widget_small
-    override val rowIds: List<RowIds> = listOf(
-        RowIds(
-            R.id.widget_row0_root, R.id.widget_row0_bar, R.id.widget_row0_name,
-            R.id.widget_row0_mode, R.id.widget_row0_added, R.id.widget_row0_days,
-            R.id.widget_row0_expire,
-        ),
-        RowIds(
-            R.id.widget_row1_root, R.id.widget_row1_bar, R.id.widget_row1_name,
-            R.id.widget_row1_mode, R.id.widget_row1_added, R.id.widget_row1_days,
-            R.id.widget_row1_expire,
-        ),
-    )
 }
 
 /** 4×2 中等：一屏能看更多条目。 */
 class ExpiryWidgetMedium : ExpiryWidgetBase() {
     override val layoutRes: Int = R.layout.widget_medium
-    override val rowIds: List<RowIds> = listOf(
-        RowIds(
-            R.id.widget_row0_root, R.id.widget_row0_bar, R.id.widget_row0_name,
-            R.id.widget_row0_mode, R.id.widget_row0_added, R.id.widget_row0_days,
-            R.id.widget_row0_expire,
-        ),
-        RowIds(
-            R.id.widget_row1_root, R.id.widget_row1_bar, R.id.widget_row1_name,
-            R.id.widget_row1_mode, R.id.widget_row1_added, R.id.widget_row1_days,
-            R.id.widget_row1_expire,
-        ),
-        RowIds(
-            R.id.widget_row2_root, R.id.widget_row2_bar, R.id.widget_row2_name,
-            R.id.widget_row2_mode, R.id.widget_row2_added, R.id.widget_row2_days,
-            R.id.widget_row2_expire,
-        ),
-    )
 }
 
 /** 4×4 大：完整清单 + 状态说明。 */
 class ExpiryWidgetLarge : ExpiryWidgetBase() {
     override val layoutRes: Int = R.layout.widget_large
-    override val rowIds: List<RowIds> = listOf(
-        RowIds(
-            R.id.widget_row0_root, R.id.widget_row0_bar, R.id.widget_row0_name,
-            R.id.widget_row0_mode, R.id.widget_row0_added, R.id.widget_row0_days,
-            R.id.widget_row0_expire,
-        ),
-        RowIds(
-            R.id.widget_row1_root, R.id.widget_row1_bar, R.id.widget_row1_name,
-            R.id.widget_row1_mode, R.id.widget_row1_added, R.id.widget_row1_days,
-            R.id.widget_row1_expire,
-        ),
-        RowIds(
-            R.id.widget_row2_root, R.id.widget_row2_bar, R.id.widget_row2_name,
-            R.id.widget_row2_mode, R.id.widget_row2_added, R.id.widget_row2_days,
-            R.id.widget_row2_expire,
-        ),
-        RowIds(
-            R.id.widget_row3_root, R.id.widget_row3_bar, R.id.widget_row3_name,
-            R.id.widget_row3_mode, R.id.widget_row3_added, R.id.widget_row3_days,
-            R.id.widget_row3_expire,
-        ),
-        RowIds(
-            R.id.widget_row4_root, R.id.widget_row4_bar, R.id.widget_row4_name,
-            R.id.widget_row4_mode, R.id.widget_row4_added, R.id.widget_row4_days,
-            R.id.widget_row4_expire,
-        ),
-    )
 }

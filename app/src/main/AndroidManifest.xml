@@ -134,6 +134,11 @@
                 android:resource="@xml/expiry_widget_large" />
         </receiver>
 
+        <service
+            android:name=".widget.ExpiryWidgetService"
+            android:exported="false"
+            android:permission="android.permission.BIND_REMOTEVIEWS" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
