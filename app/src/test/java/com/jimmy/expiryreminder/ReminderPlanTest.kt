@@ -8,6 +8,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.LocalDate
 import java.time.LocalDateTime
 
 class ReminderPlanTest {
@@ -17,12 +18,14 @@ class ReminderPlanTest {
         expireAt: String,
         remindDays: List<Int> = listOf(30, 7, 1, 0),
         archived: Boolean = false,
+        repeatEnabled: Boolean = false,
     ) = ExpiryItem(
         id = id, name = "物品$id", category = "food",
         productionDate = "", shelfLife = 0, shelfLifeUnit = ShelfLifeUnit.day,
         expireAt = expireAt, remindDays = remindDays, quantity = 1, note = "",
         images = emptyList<ExpiryImage>(), notifiedKeys = emptyList(), archived = archived,
         createdAt = "2026-01-01T00:00:00", updatedAt = "2026-01-01T00:00:00",
+        repeatEnabled = repeatEnabled,
     )
 
     @Test
@@ -101,5 +104,73 @@ class ReminderPlanTest {
         // 非法时刻按 09:00 处理
         assertTrue(ReminderService.isPastNotifyTime("25:99", LocalDateTime.of(2026, 11, 11, 10, 0)))
         assertFalse(ReminderService.isPastNotifyTime("25:99", LocalDateTime.of(2026, 11, 11, 8, 0)))
+    }
+
+    // ---- 流体云候选项：循环任务与倒计时物品规则区分 ----
+
+    private fun liveIds(items: List<ExpiryItem>, now: LocalDate): List<String> =
+        ReminderService.liveSummaryCandidates(items, now).map { it.first.id }
+
+    @Test
+    fun `短周期循环任务未设提醒档位不上流体云`() {
+        // 周期 3 天：到期日永远落在 0..7 窗口内，但未设 remindDays 就不该常驻流体云
+        val now = LocalDate.of(2026, 11, 17)
+        val items = listOf(
+            item("r1", "2026-11-19", remindDays = emptyList(), repeatEnabled = true),
+            item("r2", "2026-11-17", remindDays = emptyList(), repeatEnabled = true),
+        )
+        assertTrue(liveIds(items, now).isEmpty())
+    }
+
+    @Test
+    fun `循环任务设了提醒但当天未命中档位不上流体云`() {
+        // 到期日还有 3 天，提醒档位是 1/0 天：当天不该上云
+        val now = LocalDate.of(2026, 11, 17)
+        val items = listOf(
+            item("r1", "2026-11-20", remindDays = listOf(1, 0), repeatEnabled = true),
+        )
+        assertTrue(liveIds(items, now).isEmpty())
+    }
+
+    @Test
+    fun `循环任务当天命中提醒档位才上流体云`() {
+        val now = LocalDate.of(2026, 11, 17)
+        val items = listOf(
+            item("hit", "2026-11-20", remindDays = listOf(3, 1, 0), repeatEnabled = true),
+            item("r2", "2026-11-19", remindDays = listOf(1, 0), repeatEnabled = true),
+        )
+        assertEquals(listOf("hit"), liveIds(items, now))
+    }
+
+    @Test
+    fun `循环任务提醒档位在7天窗口外仍不上流体云`() {
+        // 距到期 10 天，即使命中 remindDays=10 也不进 7 天汇总窗口
+        val now = LocalDate.of(2026, 11, 17)
+        val items = listOf(
+            item("r1", "2026-11-27", remindDays = listOf(10, 30), repeatEnabled = true),
+        )
+        assertTrue(liveIds(items, now).isEmpty())
+    }
+
+    @Test
+    fun `倒计时物品维持7天窗口且不依赖提醒档位`() {
+        val now = LocalDate.of(2026, 11, 17)
+        val items = listOf(
+            item("n1", "2026-11-20", remindDays = emptyList()),      // 3 天，未设提醒也上云
+            item("n2", "2026-11-24", remindDays = listOf(0)),        // 7 天，档位未命中也上云
+            item("n3", "2026-11-25", remindDays = listOf(60, 30)),   // 8 天，窗口外不上云
+            item("n4", "2026-11-10", remindDays = listOf(0)),        // 已过期，不上云
+        )
+        assertEquals(listOf("n1", "n2"), liveIds(items, now))
+    }
+
+    @Test
+    fun `归档与非法日期的循环任务不上流体云`() {
+        val now = LocalDate.of(2026, 11, 17)
+        val items = listOf(
+            item("arch", "2026-11-18", remindDays = listOf(1), repeatEnabled = true, archived = true),
+            item("bad", "not-a-date", remindDays = listOf(1), repeatEnabled = true),
+        )
+        assertTrue(liveIds(items, now).isEmpty())
     }
 }

@@ -25,6 +25,7 @@ import com.jimmy.expiryreminder.core.ExpiryStore
 import com.jimmy.expiryreminder.core.SettingsStore
 import java.time.Duration
 import java.time.Instant
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
@@ -410,10 +411,7 @@ object ReminderService {
             cancelLiveSummary(context)
             return
         }
-        val soon = store.items.mapNotNull { item ->
-            if (item.archived || !Dates.isValidISODate(item.expireAt)) null
-            else Dates.daysUntil(item.expireAt)?.takeIf { it in 0..7 }?.let { item to it }
-        }.sortedBy { it.second }
+        val soon = liveSummaryCandidates(store.items)
         if (soon.isEmpty()) {
             cancelLiveSummary(context)
             return
@@ -421,6 +419,28 @@ object ReminderService {
         val content = liveSummaryContent(soon)
         showLiveSummary(context, content)
     }
+
+    /**
+     * 流体云候选项筛选（纯函数，无副作用，可单测）。
+     *
+     * 倒计时物品维持原规则：到期日落在 [0, LIVE_WINDOW_DAYS] 天内即上云。
+     *
+     * 循环任务走独立规则：除窗口限制外，还必须命中用户设置的提醒档位
+     * ([ExpiryItem.remindDays])才上云。原因是循环任务的到期日恒为「完成日 + 周期 − 1」，
+     * 周期 ≤7 天时到期日永远落在 0..7 窗口内，若套用倒计时规则会长期常驻流体云；
+     * 要求命中提醒档位后，上云时点与闹钟提醒保持一致——没设提醒天数的循环任务完全不上云，
+     * 设了档位的只在对应天数当天上云。
+     */
+    internal fun liveSummaryCandidates(
+        items: List<ExpiryItem>,
+        now: LocalDate = LocalDate.now(),
+    ): List<Pair<ExpiryItem, Int>> = items.mapNotNull { item ->
+        if (item.archived || !Dates.isValidISODate(item.expireAt)) null
+        else Dates.daysUntil(item.expireAt, now)?.takeIf { days ->
+            days in 0..LIVE_WINDOW_DAYS &&
+                (!item.repeatEnabled || days in item.remindDays)
+        }?.let { item to it }
+    }.sortedBy { it.second }
 
     /**
      * 流体云卡片的内容编排。

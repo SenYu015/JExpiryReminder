@@ -14,11 +14,13 @@ class ExpiryWidgetService : RemoteViewsService() {
         Factory(
             applicationContext,
             intent.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, AppWidgetManager.INVALID_APPWIDGET_ID),
+            intent.getStringExtra(ExpiryWidgetBase.EXTRA_MODE) ?: WidgetPrefs.MODE_COUNTDOWN,
         )
 
     private class Factory(
         private val context: Context,
         @Suppress("UNUSED_PARAMETER") private val widgetId: Int,
+        private val mode: String,
     ) : RemoteViewsService.RemoteViewsFactory {
 
         private var items: List<WidgetItem> = emptyList()
@@ -26,7 +28,8 @@ class ExpiryWidgetService : RemoteViewsService() {
         override fun onCreate() = Unit
 
         override fun onDataSetChanged() {
-            items = WidgetData.load(context)
+            // 跟随 adapter intent 传入的模式取对应列表；手动选择的持久化由 Provider 负责
+            items = WidgetData.load(context).rowsOf(mode)
         }
 
         override fun onDestroy() {

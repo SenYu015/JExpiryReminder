@@ -42,15 +42,45 @@
                 android:textStyle="bold"
                 android:includeFontPadding="false" />
 
-            <TextView
-                android:id="@+id/widget_count_label"
+            <!-- 切换椭圆：两个 label 同框，点哪个切到哪个；左侧留 12dp 与数字拉开距离 -->
+            <LinearLayout
+                android:id="@+id/widget_mode_pill"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="到期列表"
-                android:textColor="#E6A23C"
-                android:textSize="17sp"
-                android:textStyle="bold"
-                android:paddingStart="9dp" />
+                android:layout_marginStart="12dp"
+                android:orientation="horizontal"
+                android:background="@drawable/widget_mode_pill_light"
+                android:gravity="center_vertical"
+                android:padding="3dp">
+
+                <TextView
+                    android:id="@+id/widget_tab_countdown"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:gravity="center"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="14dp"
+                    android:paddingTop="7dp"
+                    android:paddingBottom="7dp"
+                    android:text="倒计时"
+                    android:textColor="#E6A23C"
+                    android:textSize="15sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/widget_tab_cycle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:gravity="center"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="14dp"
+                    android:paddingTop="7dp"
+                    android:paddingBottom="7dp"
+                    android:text="循环任务"
+                    android:textColor="#909399"
+                    android:textSize="15sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
 
             <TextView
                 android:layout_width="0dp"
