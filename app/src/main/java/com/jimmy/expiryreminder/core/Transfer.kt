@@ -306,15 +306,19 @@ object SpaceSync {
     /** 收到的 [incoming] 合并进本机 [spaceId] 时需要新增/覆盖哪些。 */
     fun plan(localItems: List<ExpiryItem>, incoming: List<ExpiryItem>, spaceId: String): Plan {
         val localByKey = HashMap<String, ExpiryItem>()
+        val localBySyncId = HashMap<String, ExpiryItem>()
         for (item in localItems) {
             if (item.spaceId != spaceId) continue
             localByKey.putIfAbsent(fingerprint(item), item)
+            if (item.syncId.isNotBlank()) localBySyncId.putIfAbsent(item.syncId, item)
         }
         val decisions = LinkedHashMap<String, TransferPayload.Decision>()
         var added = 0
         var updated = 0
         for (item in incoming) {
-            val local = localByKey[fingerprint(item)]
+            // 自动同步共用同一 syncId 的记录先按它认同一件，避免同名不同日期被插成两条
+            val local = item.syncId.takeIf { it.isNotBlank() }?.let { localBySyncId[it] }
+                ?: localByKey[fingerprint(item)]
             when {
                 local == null -> added += 1 // 没有条目 = 默认新增
                 newer(item.updatedAt, local.updatedAt) -> {

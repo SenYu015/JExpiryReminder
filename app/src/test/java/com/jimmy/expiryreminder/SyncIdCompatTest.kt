@@ -4,8 +4,10 @@ import com.jimmy.expiryreminder.core.DATA_VERSION
 import com.jimmy.expiryreminder.core.ExpiryData
 import com.jimmy.expiryreminder.core.ExpiryItem
 import com.jimmy.expiryreminder.core.ShelfLifeUnit
+import com.jimmy.expiryreminder.core.Tombstone
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SyncIdCompatTest {
@@ -48,10 +50,30 @@ class SyncIdCompatTest {
     }
 
     @Test
-    fun `数据版本已升到 v12（含 syncId、分类默认提醒与循环任务标记）`() {
+    fun `数据版本已升到 v13（含 syncId、分类默认提醒、循环任务标记与删除墓碑）`() {
         // v9 起 data.json 带 rev/revision 时钟，v10 加 syncId，
-        // 合并上游 v9「分类默认提醒」后用 v11 统一标记；v12 增加循环任务标记
-        assertEquals(12, DATA_VERSION)
+        // v12 加循环任务标记；v13 加删除墓碑 tombstones（删除动作可同步到另一台设备）
+        assertEquals(13, DATA_VERSION)
+    }
+
+    @Test
+    fun `删除墓碑随 data json 往返保持不变`() {
+        val payload = ExpiryData(
+            version = DATA_VERSION,
+            items = emptyList(),
+            categories = emptyList(),
+            categoryColors = emptyMap(),
+            tombstones = mapOf("i1" to Tombstone("i1", "s_i1", 42L)),
+        ).toJson()
+        val arr = payload.getJSONArray("tombstones")
+        assertEquals(1, arr.length())
+        val restored = Tombstone.fromJson(arr.getJSONObject(0))
+        assertEquals("i1", restored?.id)
+        assertEquals("s_i1", restored?.syncId)
+        assertEquals(42L, restored?.rev)
+        // 旧数据没有 tombstones 键时不会写坏 JSON，读取端按空处理
+        assertTrue(payload.has("tombstones"))
+        assertTrue(ExpiryData(version = DATA_VERSION, items = emptyList(), categories = emptyList(), categoryColors = emptyMap()).toJson().getJSONArray("tombstones").length() == 0)
     }
 
     @Test

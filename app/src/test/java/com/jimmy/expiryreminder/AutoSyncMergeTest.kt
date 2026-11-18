@@ -6,6 +6,7 @@ import com.jimmy.expiryreminder.core.ExpiryItem
 import com.jimmy.expiryreminder.core.ShelfLifeUnit
 import com.jimmy.expiryreminder.core.Similarity
 import com.jimmy.expiryreminder.core.SyncDelta
+import com.jimmy.expiryreminder.core.Tombstone
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -159,5 +160,88 @@ class AutoSyncMergeTest {
         assertEquals(12, merged.shelfLife)
         assertEquals("放冰箱 / 第二层", merged.note)
         assertEquals(listOf(30, 7), merged.remindDays)
+    }
+
+    // ------------------------------------------------------------ v2.0.33 兜底匹配与墓碑
+
+    @Test
+    fun `循环物品完成周期后到期日变化，同名单一候选自动合并为新者覆盖`() {
+        val local = item("local", "牛奶", expireAt = "2027-02-10", rev = 3).copy(
+            repeatEnabled = true, shelfLife = 6,
+        )
+        val remote = item(
+            "remote", "牛奶", expireAt = "2027-08-09",
+            updatedAt = "2026-06-01T00:00:00Z", rev = 9, syncId = "s_r",
+        ).copy(repeatEnabled = true, shelfLife = 6)
+        val plan = AutoSyncMerge.plan(listOf(local), listOf(remote), "设备B")
+        assertEquals(0, plan.adds.size)
+        assertEquals(0, plan.conflicts.size)
+        assertEquals(1, plan.updates.size)
+        assertEquals("local", plan.updates[0].id)
+        assertEquals("2027-08-09", plan.updates[0].expireAt)
+        // 收敛到同一个共同唯一 ID，之后不再重复匹配
+        assertEquals("s_r", plan.updates[0].syncId)
+    }
+
+    @Test
+    fun `同名单一候选到期日不同且非循环，挂人工冲突而不是悄悄插成第二条`() {
+        val local = item("local", "牛奶", expireAt = "2027-02-10", rev = 3)
+        val remote = item("remote", "牛奶", expireAt = "2027-08-09", rev = 9, syncId = "s_r")
+        val plan = AutoSyncMerge.plan(listOf(local), listOf(remote), "设备B")
+        assertEquals(0, plan.adds.size)
+        assertEquals(1, plan.conflicts.size)
+        assertEquals("local", plan.conflicts[0].local.id)
+        assertEquals("remote", plan.conflicts[0].incoming.id)
+    }
+
+    @Test
+    fun `同名两条候选属于不同批次，不做猜测直接新增`() {
+        val plan = AutoSyncMerge.plan(
+            listOf(
+                item("l1", "牛奶", expireAt = "2027-02-10"),
+                item("l2", "牛奶", expireAt = "2027-09-01"),
+            ),
+            listOf(item("remote", "牛奶", expireAt = "2027-05-05", rev = 2, syncId = "s_r")),
+            "设备B",
+        )
+        assertEquals(1, plan.adds.size)
+        assertEquals(0, plan.conflicts.size)
+    }
+
+    @Test
+    fun `同名但数量不同挂人工冲突，同名同数量走业务键正常合并`() {
+        // 数量不同 → 业务键失配 → 冲突兜底
+        val conflict = AutoSyncMerge.plan(
+            listOf(item("local", "鸡蛋", expireAt = "2027-02-10", rev = 3)),
+            listOf(item("remote", "鸡蛋", expireAt = "2027-02-10", rev = 9, syncId = "s_r").copy(quantity = 2)),
+            "设备B",
+        )
+        assertEquals(1, conflict.conflicts.size)
+        // 数量相同 → 业务键命中 → 正常覆盖
+        val merged = AutoSyncMerge.plan(
+            listOf(item("local", "鸡蛋", expireAt = "2027-02-10", rev = 3)),
+            listOf(item("remote", "鸡蛋", expireAt = "2027-02-10", rev = 9, syncId = "s_r")),
+            "设备B",
+        )
+        assertEquals(1, merged.updates.size)
+        assertEquals(0, merged.conflicts.size)
+    }
+
+    @Test
+    fun `已删除的物品被对端重新发来时被墓碑挡住，编辑过则允许回来`() {
+        val tombstones = mapOf("remote" to Tombstone("remote", "s_r", rev = 50L))
+        val old = item("remote", "牛奶", rev = 9, syncId = "s_r")
+        assertEquals(0, AutoSyncMerge.plan(emptyList(), listOf(old), "设备B", tombstones = tombstones).adds.size)
+        // 对端在本机删除之后又编辑过（rev 更高）：以编辑为准，允许重新入库
+        val edited = old.copy(rev = 60L)
+        assertEquals(1, AutoSyncMerge.plan(emptyList(), listOf(edited), "设备B", tombstones = tombstones).adds.size)
+    }
+
+    @Test
+    fun `墓碑按 syncId 也能挡住旧副本`() {
+        val tombstones = mapOf("t1" to Tombstone("t1", "s_old", rev = 30L))
+        val remote = item("remote-x", "酸奶", rev = 5, syncId = "s_old")
+        val plan = AutoSyncMerge.plan(emptyList(), listOf(remote), "设备B", tombstones = tombstones)
+        assertEquals(0, plan.adds.size)
     }
 }

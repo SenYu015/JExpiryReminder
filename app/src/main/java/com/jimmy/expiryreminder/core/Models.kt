@@ -440,11 +440,14 @@ data class ExpiryData(
     val spaceColors: Map<String, String> = emptyMap(),
     /** 本机全局修改时钟：所有物品 rev 的最大值水位，随 data.json 一起落盘。 */
     val revision: Long = 0,
-    /**
-     * 每种分类在「新增物品」时预填的提前提醒天数（键 = 分类 id）。
+    /** 每种分类在「新增物品」时预填的提前提醒天数（键 = 分类 id）。
      * 没有登记的键表示该分类无默认值，新增物品时不预选任何档位。
      */
     val categoryRemindDefaults: Map<String, List<Int>> = emptyMap(),
+    /** 删除墓碑：本机删过的物品（id → 墓碑），随 data.json 落盘并参与同步，
+     *  让「删掉」这个动作能传播到另一台设备（缺键按空读取，不迁移历史数据）。
+     */
+    val tombstones: Map<String, Tombstone> = emptyMap(),
 ) {
     fun toJson(): JSONObject {
         val colors = JSONObject()
@@ -455,6 +458,8 @@ data class ExpiryData(
         for ((k, v) in spaceColors) spaceColorJson.put(k, v)
         val remindDefaults = JSONObject()
         for ((k, v) in categoryRemindDefaults) remindDefaults.put(k, JSONArray(v))
+        val tombstoneArr = JSONArray()
+        for (t in tombstones.values) tombstoneArr.put(t.toJson())
         return JSONObject()
             .put("version", version)
             .put("items", JSONArray(items.map { it.toJson() }))
@@ -466,7 +471,45 @@ data class ExpiryData(
             .put("spaceColors", spaceColorJson)
             .put("revision", revision)
             .put("categoryRemindDefaults", remindDefaults)
+            .put("tombstones", tombstoneArr)
     }
+}
+
+/** 删除墓碑：一条已删除物品的最小痕迹，用于把删除动作同步给另一台设备。 */
+data class Tombstone(
+    /** 被删物品的本机 id（两端收敛后共用同一 id）。 */
+    val id: String,
+    /** 共同唯一 ID：对端可能只有 syncId 对得上的副本，删除时按它兜底匹配。 */
+    val syncId: String,
+    /** 删除时的修改标记：rev 大于对端副本的 rev 才允许删对方的。 */
+    val rev: Long,
+) {
+    fun toJson(): JSONObject =
+        JSONObject().put("id", id).put("syncId", syncId).put("rev", rev)
+
+    companion object {
+        fun fromJson(raw: Any?): Tombstone? {
+            if (raw !is JSONObject) return null
+            val id = raw.optStringOrNull("id")?.takeIf { it.isNotBlank() } ?: return null
+            return Tombstone(
+                id = id,
+                syncId = raw.optStringOrNull("syncId").orEmpty(),
+                rev = raw.optLong("rev", 0L),
+            )
+        }
+    }
+}
+
+/** 一次增量同步要发出去的内容：变更记录 + 删除墓碑。 */
+data class SyncSlice(
+    val items: List<ExpiryItem> = emptyList(),
+    val tombstones: List<Tombstone> = emptyList(),
+) {
+    val isEmpty: Boolean get() = items.isEmpty() && tombstones.isEmpty()
+    val maxRev: Long get() = maxOf(
+        items.maxOfOrNull { it.rev } ?: 0L,
+        tombstones.maxOfOrNull { it.rev } ?: 0L,
+    )
 }
 
 /**
@@ -478,8 +521,9 @@ data class ExpiryData(
  * 注：v9 在本分支同时承载「rev/revision 时钟」与「分类默认提醒」两项上游先后引入的语义，
  * 因 DATA_VERSION 仅作落盘标记、不参与读取分支判断，合并后统一记为 v11 以区别于两侧历史版本。
  * v12 增加物品的 repeatEnabled 循环任务标记（旧数据缺字段按 false 读取，不改写历史数据）。
+ * v13 增加删除墓碑 tombstones（旧数据缺键按空读取）：删除动作经自动同步传播到另一台设备。
  */
-const val DATA_VERSION = 12
+const val DATA_VERSION = 13
 
 // ---------------------------------------------------------------- 状态
 

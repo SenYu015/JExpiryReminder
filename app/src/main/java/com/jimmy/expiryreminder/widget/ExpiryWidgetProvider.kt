@@ -52,6 +52,17 @@ object WidgetData {
     private const val MAX_ROWS = 60
 
     /**
+     * 循环任务入选上限：防止短期循环任务长期霸占列表顶部。
+     *
+     * 背景：循环任务的 expireAt 永远贴着当前周期，按到期日升序时必然排在
+     * 一次性倒计时任务之前，数量一多就把其他任务挤出可视区。因此倒计时
+     * 任务优先占位（最多 MAX_ROWS 条），循环任务最多补入 REPEAT_MAX_ROWS 条；
+     * 合并后再按到期日统一重排，展示顺序仍是紧迫度优先，只是循环任务的
+     * 入选条数有上限。若列表里只有循环任务，仍最多展示 MAX_ROWS 条。
+     */
+    private const val REPEAT_MAX_ROWS = 12
+
+    /**
      * 解析结果缓存：data.json 的 (mtime, size) 与深浅色都没变时直接复用。
      * RemoteViewsFactory.onDataSetChanged 会在每次列表刷新/滚动时被调用，
      * 不缓存的话每条都要重新解析整份 data.json（几千条时明显卡顿）。
@@ -100,10 +111,16 @@ object WidgetData {
         for (i in 0 until arr.length()) {
             ExpiryItem.fromJson(arr.opt(i))?.let { if (!it.archived) items += it }
         }
-        // 混排：全部物品按到期日升序，取前 MAX_ROWS 条；同时统计两类条数
+        // 选取：倒计时优先占位，循环任务限量补入（见 REPEAT_MAX_ROWS 注释），
+        // 合并后按到期日重排，行序仍按紧迫度展示
         val sorted = items.sortedWith(compareBy({ it.expireAt.ifBlank { "9999-12-31" } }, { it.name }))
-        val rows = ArrayList<WidgetItem>()
-        for (item in sorted) {
+        val countdownRows = sorted.filter { !it.repeatEnabled }.take(MAX_ROWS)
+        val repeatRows = sorted.filter { it.repeatEnabled }
+            .take(minOf(REPEAT_MAX_ROWS, MAX_ROWS - countdownRows.size))
+        val selected = (countdownRows + repeatRows)
+            .sortedWith(compareBy({ it.expireAt.ifBlank { "9999-12-31" } }, { it.name }))
+        val rows = ArrayList<WidgetItem>(selected.size)
+        for (item in selected) {
             val days = if (item.expireAt.isBlank()) Int.MAX_VALUE
                 else (runCatching { Dates.daysUntil(item.expireAt) }.getOrNull() ?: Int.MAX_VALUE)
             val status = when {
@@ -122,27 +139,25 @@ object WidgetData {
             val subText = listOf(spaceText, addedText)
                 .filter { it.isNotEmpty() }
                 .joinToString(" · ")
-            if (rows.size < MAX_ROWS) {
-                rows += WidgetItem(
-                    id = item.id,
-                    name = item.name,
-                    expireAt = item.expireAt,
-                    daysText = if (item.expireAt.isBlank()) "未设置"
-                    else Dates.describeRemaining(item.expireAt),
-                    expireText = if (item.expireAt.isBlank()) "到期 未设置"
-                    else if (item.repeatEnabled) "本周期到期 ${item.expireAt}"
-                    else "到期 ${item.expireAt}",
-                    subText = subText,
-                    barColor = runCatching {
-                        Color.parseColor(categoryColors[item.category] ?: "#909399")
-                    }.getOrDefault(Color.GRAY),
-                    statusColor = runCatching {
-                        Color.parseColor(WidgetTheme.statusHex(status, dark))
-                    }.getOrDefault(Color.GRAY),
-                    rowBg = WidgetTheme.rowBg(status, dark),
-                    repeatEnabled = item.repeatEnabled,
-                )
-            }
+            rows += WidgetItem(
+                id = item.id,
+                name = item.name,
+                expireAt = item.expireAt,
+                daysText = if (item.expireAt.isBlank()) "未设置"
+                else Dates.describeRemaining(item.expireAt),
+                expireText = if (item.expireAt.isBlank()) "到期 未设置"
+                else if (item.repeatEnabled) "本周期到期 ${item.expireAt}"
+                else "到期 ${item.expireAt}",
+                subText = subText,
+                barColor = runCatching {
+                    Color.parseColor(categoryColors[item.category] ?: "#909399")
+                }.getOrDefault(Color.GRAY),
+                statusColor = runCatching {
+                    Color.parseColor(WidgetTheme.statusHex(status, dark))
+                }.getOrDefault(Color.GRAY),
+                rowBg = WidgetTheme.rowBg(status, dark),
+                repeatEnabled = item.repeatEnabled,
+            )
         }
         val snapshot = WidgetSnapshot(
             rows = rows,
@@ -162,6 +177,13 @@ object WidgetData {
  * adapter intent 的 data URI 必须固定为实例级（不按内容/模式拆分），否则部分启动器
  * （ColorOS）不重建连接，会留下残留工厂互相覆盖列表；工厂每次 onDataSetChanged
  * 动态读数据快照，连接复用也总能拿到最新内容。
+ *
+ * 交互能力边界（勿再尝试）：RemoteViews 只支持点击类交互
+ * （setOnClickPendingIntent / setPendingIntentTemplate / 行内 fillInIntent），
+ * 没有 setOnLongClickListener 之类的长按 API；且长按手势由启动器保留用于弹出
+ * 小组件管理菜单（调整大小/移除等），启动器窗口层级更高，应用收不到该事件。
+ * ColorOS 万能卡片同样基于 AppWidget 协议，结论一致：小组件内无法实现
+ * 「长按卡片添加任务」，只能用卡片内按钮/区域点击替代。
  */
 abstract class ExpiryWidgetBase : AppWidgetProvider() {
 
@@ -212,6 +234,9 @@ abstract class ExpiryWidgetBase : AppWidgetProvider() {
 
         views.setTextColor(R.id.widget_empty, palette.muted)
         views.setOnClickPendingIntent(R.id.widget_add, addPendingIntent(context))
+        // 长按卡片被启动器保留为小组件管理手势（见 ExpiryWidgetBase 类注释），
+        // 无法用它触发新增；空态区域整块可点，作为无物品时最直接的添加入口
+        views.setOnClickPendingIntent(R.id.widget_empty, addPendingIntent(context))
         views.setOnClickPendingIntent(R.id.widget_camera, cameraPendingIntent(context))
         // 相机键：圆形底与图标色都跟随应用主题（图标用 colorFilter 着色，不影响底形）
         views.setInt(R.id.widget_camera, "setBackgroundResource", WidgetTheme.camBg(dark))

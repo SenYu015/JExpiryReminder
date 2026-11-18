@@ -37,6 +37,8 @@ class ExpiryStore private constructor() {
         val revision: Long = 0,
         /** 各分类新增物品时预填的提前提醒天数（键 = 分类 id；没有键 = 无默认）。 */
         val categoryRemindDefaults: Map<String, List<Int>> = emptyMap(),
+        /** 删除墓碑（键 = 物品 id）：删除动作要经同步传播到另一台设备。 */
+        val tombstones: Map<String, Tombstone> = emptyMap(),
     )
 
     private val _state = MutableStateFlow(State())
@@ -58,6 +60,9 @@ class ExpiryStore private constructor() {
         item.copy(rev = 0L, syncId = "").toJson().toString().hashCode()
 
     companion object {
+        /** 墓碑留存上限：超过后从最旧的开始丢，防止极端情况下无限增长。 */
+        private const val MAX_TOMBSTONES = 10_000
+
         @Volatile
         private var instance: ExpiryStore? = null
 
@@ -391,6 +396,7 @@ class ExpiryStore private constructor() {
                 spaceColors = spaceColors,
                 revision = stored?.optLong("revision", 0L) ?: 0L,
                 categoryRemindDefaults = remindDefaults,
+                tombstones = readTombstones(stored),
             )
             // 以当前内容作为「已落盘」基线，首次写入不会把全部老数据误判成新修改
             lastHashes.clear()
@@ -462,6 +468,7 @@ class ExpiryStore private constructor() {
             spaceColors = next.spaceColors,
             revision = next.revision,
             categoryRemindDefaults = next.categoryRemindDefaults,
+            tombstones = next.tombstones,
         )
         AtomicFiles.writeText(file, payload.toJson().toString(2))
     }
@@ -559,9 +566,87 @@ class ExpiryStore private constructor() {
         }
     }
 
-    /** 增量同步：只取出对方「上次确认水位」之后发生变更的记录。 */
-    fun itemsSince(sinceRev: Long): List<ExpiryItem> =
-        _state.value.items.filter { it.rev > sinceRev }
+    /** 增量同步：只取出对方「上次确认水位」之后发生变更的记录与删除墓碑。 */
+    fun itemsSince(sinceRev: Long): SyncSlice = SyncSlice(
+        items = _state.value.items.filter { it.rev > sinceRev },
+        tombstones = _state.value.tombstones.values.filter { it.rev > sinceRev },
+    )
+
+    /** 本机墓碑快照（供合并阶段挡住「已删物品被对端重新加回来」）。 */
+    fun tombstoneMap(): Map<String, Tombstone> = _state.value.tombstones
+
+    /**
+     * 应用对端发来的删除墓碑：
+     * - 对端副本 rev 更低（对方是在本机副本的旧版本上删的）→ 跟随删除；
+     * - 本机副本 rev 更高（本机在对方删除之后又编辑过）→ 保留并抬 rev 回传（编辑胜过删除）；
+     * - 本机没有这条物品 → 只登记墓碑，挡住对方以后把同一条再加回来。
+     * 返回实际删除的条数。
+     */
+    suspend fun applyRemoteDeletions(context: Context, incoming: List<Tombstone>): Int {
+        if (incoming.isEmpty()) return 0
+        var deleted = 0
+        var changed = false
+        mutex.withLock {
+            val list = _state.value.items.toMutableList()
+            val tombs = HashMap(_state.value.tombstones)
+            var clock = _state.value.revision
+            for (t in incoming) {
+                if (t.id.isBlank() || t.rev <= 0L) continue
+                tombs[t.id]?.let { if (it.rev >= t.rev) continue }
+                val index = list.indexOfFirst {
+                    it.id == t.id || (t.syncId.isNotBlank() && it.syncId == t.syncId)
+                }
+                if (index >= 0) {
+                    val item = list[index]
+                    if (item.rev <= t.rev) {
+                        list.removeAt(index)
+                        deleted += 1
+                    } else {
+                        clock += 1
+                        list[index] = item.copy(rev = clock)
+                    }
+                }
+                tombs[t.id] = t
+                if (t.rev > clock) clock = t.rev
+                changed = true
+            }
+            if (changed) {
+                _state.value = _state.value.copy(items = list, tombstones = tombs, revision = clock)
+                persistLocked(context, syncApply = true)
+            }
+        }
+        return deleted
+    }
+
+    /**
+     * 裁剪墓碑：所有已配对设备都确认收到过（rev 低于水位）的墓碑不再需要保留。
+     * 由同步引擎在每轮成功后调用；数量上限兜底，防止无限增长。
+     */
+    suspend fun pruneTombstones(context: Context, ackedBelowRev: Long): Int {
+        if (ackedBelowRev <= 0L) return 0
+        mutex.withLock {
+            val current = _state.value.tombstones
+            val kept = current.values.filter { it.rev > ackedBelowRev }
+            if (kept.size == current.size) return 0
+            // 上限兜底：超过上限时从最旧的开始丢（这些设备大概率已经不在线了）
+            val capped = if (kept.size > MAX_TOMBSTONES) {
+                kept.sortedBy { it.rev }.takeLast(MAX_TOMBSTONES)
+            } else kept
+            _state.value = _state.value.copy(tombstones = capped.associateBy { it.id })
+            persistLocked(context, syncApply = true)
+            return current.size - capped.size
+        }
+    }
+
+    /** data.json 里的墓碑数组；缺键（旧版本数据）按空读取。 */
+    private fun readTombstones(stored: JSONObject?): Map<String, Tombstone> {
+        val arr = stored?.optJSONArray("tombstones") ?: return emptyMap()
+        val out = LinkedHashMap<String, Tombstone>()
+        for (i in 0 until arr.length()) {
+            Tombstone.fromJson(arr.opt(i))?.let { out[it.id] = it }
+        }
+        return out
+    }
 
     // ---------------------------------------------------------------- items
 
@@ -662,8 +747,16 @@ class ExpiryStore private constructor() {
     suspend fun removeItem(context: Context, id: String) {
         var removed: ExpiryItem? = null
         mutex.withLock {
-            removed = _state.value.items.firstOrNull { it.id == id }
-            _state.value = _state.value.copy(items = _state.value.items.filter { it.id != id })
+            val item = _state.value.items.firstOrNull { it.id == id } ?: return@withLock
+            removed = item
+            val tombs = HashMap(_state.value.tombstones)
+            val clock = _state.value.revision + 1
+            tombs[item.id] = Tombstone(item.id, item.syncId.ifBlank { "s_" + item.id }, clock)
+            _state.value = _state.value.copy(
+                items = _state.value.items.filter { it.id != id },
+                tombstones = tombs,
+                revision = clock,
+            )
             persistLocked(context)
         }
         removed?.let { ImageStore.removeImages(context, it.images.map { img -> img.path }) }
@@ -676,7 +769,18 @@ class ExpiryStore private constructor() {
         var removedItems: List<ExpiryItem> = emptyList()
         mutex.withLock {
             removedItems = _state.value.items.filter { it.id in drop }
-            _state.value = _state.value.copy(items = _state.value.items.filterNot { it.id in drop })
+            if (removedItems.isEmpty()) return@withLock
+            val tombs = HashMap(_state.value.tombstones)
+            var clock = _state.value.revision
+            for (item in removedItems) {
+                clock += 1
+                tombs[item.id] = Tombstone(item.id, item.syncId.ifBlank { "s_" + item.id }, clock)
+            }
+            _state.value = _state.value.copy(
+                items = _state.value.items.filterNot { it.id in drop },
+                tombstones = tombs,
+                revision = clock,
+            )
             persistLocked(context)
         }
         if (removedItems.isNotEmpty()) {
@@ -770,7 +874,13 @@ class ExpiryStore private constructor() {
     suspend fun clearItems(context: Context) {
         val paths = items.flatMap { it.images.map { img -> img.path } }
         mutex.withLock {
-            _state.value = _state.value.copy(items = emptyList())
+            val tombs = HashMap(_state.value.tombstones)
+            var clock = _state.value.revision
+            for (item in _state.value.items) {
+                clock += 1
+                tombs[item.id] = Tombstone(item.id, item.syncId.ifBlank { "s_" + item.id }, clock)
+            }
+            _state.value = _state.value.copy(items = emptyList(), tombstones = tombs, revision = clock)
             persistLocked(context)
         }
         ImageStore.removeImages(context, paths)

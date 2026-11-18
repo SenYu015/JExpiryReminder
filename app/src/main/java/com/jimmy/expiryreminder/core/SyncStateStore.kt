@@ -96,6 +96,17 @@ object SyncStateStore {
         return peers.size
     }
 
+    /**
+     * 所有已登记设备中最低的「已确认收到」水位：低于它的删除墓碑可以安全裁掉。
+     * 没有任何设备记录过水位时返回 0（不裁剪）。
+     */
+    @Synchronized
+    fun minAckedRev(context: Context): Long {
+        ensure(context)
+        val revs = peers.values.map { it.sentRev }.filter { it > 0L }
+        return revs.minOrNull() ?: 0L
+    }
+
     @Synchronized
     fun syncedIds(context: Context): Set<String> {
         ensure(context)

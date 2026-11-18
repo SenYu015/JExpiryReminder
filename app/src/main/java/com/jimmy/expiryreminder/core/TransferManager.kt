@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.net.Inet4Address
@@ -31,6 +32,8 @@ class TransferManager private constructor() {
         val name: String,
         val host: String,
         val port: Int,
+        /** 对端设备 id：用于在列表里标注「已配对」，手动添加的没有。 */
+        val deviceId: String = "",
         val manual: Boolean = false,
     )
 
@@ -98,7 +101,17 @@ class TransferManager private constructor() {
 
     private val manualPeers = mutableListOf<Peer>()
 
+    /** 传输页打开计数：离开页面后服务再保留一会儿，方便另一台设备慢半拍连进来。 */
+    private var pageRefCount = 0
+    private var stopJob: Job? = null
+
+    /** 离开传输页后接收服务保留的时长：给对方留出配对窗口，不必两台同时盯着页面。 */
+    private val lingerMs = 10 * 60_000L
+
     fun start(context: Context) {
+        pageRefCount += 1
+        stopJob?.cancel()
+        stopJob = null
         if (_running.value) return
         val appContext = context.applicationContext
         this.appContext = appContext
@@ -129,7 +142,13 @@ class TransferManager private constructor() {
             scope.launch {
                 disc.peers.collect { found ->
                     val mapped = found.map {
-                        Peer(key = it.serviceName, name = it.name, host = it.host, port = it.port)
+                        Peer(
+                            key = it.serviceName,
+                            name = it.name,
+                            host = it.host,
+                            port = it.port,
+                            deviceId = it.deviceId,
+                        )
                     }
                     _peers.value = mapped + manualPeers
                 }
@@ -154,6 +173,9 @@ class TransferManager private constructor() {
     }
 
     fun stop() {
+        pageRefCount = 0
+        stopJob?.cancel()
+        stopJob = null
         collectJob?.cancel()
         collectJob = null
         discoveryJobs.forEach { it.cancel() }
@@ -178,6 +200,20 @@ class TransferManager private constructor() {
     fun respondPair(accept: Boolean) {
         _pairRequest.value?.respond?.invoke(accept)
         _pairRequest.value = null
+    }
+
+    /**
+     * 离开传输页：接收服务不立刻关，再保留 [lingerMs]，
+     * 另一台设备慢半帧进页面也能配上对；期间重新进页则取消关闭。
+     */
+    fun scheduleStop() {
+        pageRefCount = (pageRefCount - 1).coerceAtLeast(0)
+        if (pageRefCount > 0 || !_running.value) return
+        stopJob?.cancel()
+        stopJob = scope.launch {
+            delay(lingerMs)
+            if (pageRefCount <= 0) stop()
+        }
     }
 
     /** 收到同步请求后作答：传本地空间 id 表示接受，null 表示拒绝。 */

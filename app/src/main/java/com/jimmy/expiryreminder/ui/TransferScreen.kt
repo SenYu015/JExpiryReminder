@@ -54,7 +54,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.jimmy.expiryreminder.core.AutoSyncEngine
 import com.jimmy.expiryreminder.core.ExpiryStore
+import com.jimmy.expiryreminder.core.PeerTrust
+import com.jimmy.expiryreminder.core.SettingsStore
 import com.jimmy.expiryreminder.core.SpaceDef
 import com.jimmy.expiryreminder.core.Spaces
 import com.jimmy.expiryreminder.core.TransferManager
@@ -90,10 +93,10 @@ fun TransferScreen(itemIds: List<String>, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
 
-    // 页面在传输服务就在；离开即关闭端口，配对 token 作废
+    // 页面在传输服务就在；离开后服务再保留 10 分钟，对方慢半帧进来也能配上
     DisposableEffect(Unit) {
         manager.start(context)
-        onDispose { manager.stop() }
+        onDispose { manager.scheduleStop() }
     }
 
     // 搜索超过这么久还没结果，就不再让用户干等，直接把可能原因摊开
@@ -148,6 +151,18 @@ fun TransferScreen(itemIds: List<String>, onBack: () -> Unit) {
         }
     }
 
+    /**
+     * 配对成功后立刻验证自动同步通道：不用等下一轮后台同步，
+     * 成败当场见分晓，避免「以为绑好了、其实没绑上」。
+     */
+    fun verifyAutoSync(context: android.content.Context) {
+        scope.launch {
+            if (!SettingsStore.get().autoSyncEnabled.value) return@launch
+            val text = AutoSyncEngine.syncNow(context)
+            showMessage("自动同步通道：$text")
+        }
+    }
+
     fun startSend(peer: TransferManager.Peer) {
         if (items.isEmpty()) {
             showMessage("先回首页长按多选物品，再点「分享」")
@@ -162,6 +177,7 @@ fun TransferScreen(itemIds: List<String>, onBack: () -> Unit) {
             sendingPin = null
             result.onSuccess { count ->
                 showMessage("已送达 $count 件，等待对方选择空间收录")
+                verifyAutoSync(context)
             }.onFailure { error ->
                 showMessage("发送失败：${error.message ?: "未知错误"}")
             }
@@ -183,6 +199,7 @@ fun TransferScreen(itemIds: List<String>, onBack: () -> Unit) {
                         + "本机新增 ${outcome.localAdded} / 更新 ${outcome.localUpdated}，"
                         + "对方新增 ${outcome.peerAdded} / 更新 ${outcome.peerUpdated}",
                 )
+                verifyAutoSync(context)
             }.onFailure { error ->
                 showMessage("同步失败：${error.message ?: "未知错误"}")
             }
@@ -395,6 +412,7 @@ fun TransferScreen(itemIds: List<String>, onBack: () -> Unit) {
                 for (peer in visiblePeers) {
                     PeerRow(
                         peer = peer,
+                        paired = peer.deviceId.isNotBlank() && PeerTrust.of(context, peer.deviceId) != null,
                         canSend = items.isNotEmpty(),
                         onSend = { startSend(peer) },
                         canSync = syncSpaceId != null,
@@ -423,7 +441,8 @@ fun TransferScreen(itemIds: List<String>, onBack: () -> Unit) {
             Spacer(Modifier.height(14.dp))
             Text(
                 "传输只在两台设备之间直连（局域网 TCP），不经过任何服务器。"
-                    + "只有对方确认配对码后才会开始发送。",
+                    + "配对成功一次，两台设备即建立长期信任，后台自动同步不用再进本页面；"
+                    + "离开页面后接收服务还会保留 10 分钟。",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -915,6 +934,7 @@ private fun SearchHelpCard(
 @Composable
 private fun PeerRow(
     peer: TransferManager.Peer,
+    paired: Boolean,
     canSend: Boolean,
     onSend: () -> Unit,
     canSync: Boolean,
@@ -932,15 +952,29 @@ private fun PeerRow(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(Modifier.weight(1f)) {
-                Text(
-                    peer.name,
-                    style = MaterialTheme.typography.bodyLarge,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        peer.name,
+                        style = MaterialTheme.typography.bodyLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (paired) {
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "已配对",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = hexColor("#67C23A"),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(hexColor("#67C23A").copy(alpha = 0.12f))
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                        )
+                    }
+                }
                 Text(
                     if (peer.manual) "手动添加 · ${peer.host}:${peer.port}"
-                    else "${peer.host}:${peer.port}",
+                    else "${peer.host}:${peer.port}" + if (paired) " · 自动同步已就绪" else "",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

@@ -298,6 +298,7 @@ object AutoSyncEngine {
                 ?: return reject(s, trust.secret, nonce, "载荷无法解密")
             val sinceRev = inbound.optLong("sinceRev", 0L)
             val remote = parseItems(inbound.optJSONArray("items"))
+            val remoteTombstones = parseTombstones(inbound.optJSONArray("tombstones"))
             if (remote.size > TransferPayload.MAX_ITEMS) {
                 return reject(s, trust.secret, nonce, "物品数量异常")
             }
@@ -305,12 +306,15 @@ object AutoSyncEngine {
             val remoteImages = parseImageIndex(inbound.optJSONObject("imageIndex"))
             val fromName = inbound.optString("name").ifBlank { peerId }
             // 分类/空间可能单独变化（物品没动），所以无条件走一次归并
-            applyRemote(context, remote, fromName.ifBlank { "另一台设备" }, remoteMeta, remoteImages)
+            applyRemote(
+                context, remote, fromName.ifBlank { "另一台设备" },
+                remoteMeta, remoteImages, remoteTombstones,
+            )
             // 对方声称已收到我发出的 <= sinceRev 的记录；同时推进「我从对方收到的」水位
             if (peerId.isNotBlank()) {
                 SyncStateStore.update(
                     context, peerId,
-                    recvMax = SyncDelta.maxRev(remote),
+                    recvMax = maxRevOf(remote, remoteTombstones),
                     sentMax = sinceRev,
                 )
             }
@@ -318,10 +322,11 @@ object AutoSyncEngine {
             val outgoing = ExpiryStore.get().itemsSince(sinceRev)
             val body = JSONObject()
                 .put("name", deviceName())
-                .put("items", itemsJson(outgoing))
+                .put("items", itemsJson(outgoing.items))
+                .put("tombstones", tombstonesJson(outgoing.tombstones))
                 .put("meta", localMeta().toJson())
                 .put("imageIndex", imageIndexJson())
-                .put("ackRev", SyncDelta.maxRev(remote))
+                .put("ackRev", maxRevOf(remote, remoteTombstones))
                 .put("revNow", ExpiryStore.get().revision)
             val resp = JSONObject()
                 .put("ok", true)
@@ -416,8 +421,9 @@ object AutoSyncEngine {
             lastSyncAt[peer.id] = System.currentTimeMillis()
             runCatching {
                 val remote = exchange(peer.host, peer.port, context, peer.id)
-                applyRemote(context, remote.items, peer.name, remote.meta, remote.imageIndex)
+                applyRemote(context, remote.items, peer.name, remote.meta, remote.imageIndex, remote.tombstones)
                 fetchMissingImages(context, peer.host, peer.port, peer.id)
+                pruneAckedTombstones(context)
             }.onSuccess { ok += 1 }.onFailure { lastError = it.message }
         }
         _status.value = when {
@@ -448,8 +454,9 @@ object AutoSyncEngine {
             }
             runCatching {
                 val remote = exchange(peer.host, peer.port, app, peer.id)
-                applyRemote(app, remote.items, peer.name, remote.meta, remote.imageIndex)
+                applyRemote(app, remote.items, peer.name, remote.meta, remote.imageIndex, remote.tombstones)
                 fetchMissingImages(app, peer.host, peer.port, peer.id)
+                pruneAckedTombstones(app)
             }.onSuccess {
                 ok++
                 lastSyncAt[peer.id] = System.currentTimeMillis()
@@ -484,7 +491,8 @@ object AutoSyncEngine {
                 .put("sentRev", state.sentRev)
                 .put("meta", localMeta().toJson())
                 .put("imageIndex", imageIndexJson())
-                .put("items", itemsJson(outgoing))
+                .put("items", itemsJson(outgoing.items))
+                .put("tombstones", tombstonesJson(outgoing.tombstones))
             val req = JSONObject()
                 .put("cmd", "sync")
                 .put("app", APP)
@@ -510,10 +518,11 @@ object AutoSyncEngine {
             val inbound = decBlob(trust.secret, resp.optString("payload"))
                 ?: error("返回数据无法解密，请重新配对")
             val remote = parseItems(inbound.optJSONArray("items"))
+            val remoteTombstones = parseTombstones(inbound.optJSONArray("tombstones"))
             if (remote.size > TransferPayload.MAX_ITEMS) error("对端物品数量异常")
             SyncStateStore.update(
                 context, peerId,
-                recvMax = SyncDelta.maxRev(remote),
+                recvMax = maxRevOf(remote, remoteTombstones),
                 sentMax = inbound.optLong("ackRev", 0L),
             )
             // 把本机时钟抬到对方水位，保证之后本机编辑的 rev 一定更大
@@ -522,6 +531,7 @@ object AutoSyncEngine {
                 items = remote,
                 meta = MetaSnapshot.fromJson(inbound.optJSONObject("meta")),
                 imageIndex = parseImageIndex(inbound.optJSONObject("imageIndex")),
+                tombstones = remoteTombstones,
             )
         }
     }
@@ -530,6 +540,7 @@ object AutoSyncEngine {
         val items: List<ExpiryItem>,
         val meta: MetaSnapshot,
         val imageIndex: Map<String, List<String>>,
+        val tombstones: List<Tombstone> = emptyList(),
     )
 
     /** 物品 id → 图片相对路径列表：只带路径，不带字节，用来发现「本地缺哪几张图」。 */
@@ -577,6 +588,7 @@ object AutoSyncEngine {
         from: String,
         remoteMeta: MetaSnapshot? = null,
         remoteImageIndex: Map<String, List<String>> = emptyMap(),
+        remoteTombstones: List<Tombstone> = emptyList(),
     ): SyncPlan {
         val store = ExpiryStore.get()
         // 先归并分类/空间，再把远端物品上的引用改到本机 id，最后才做物品合并
@@ -585,8 +597,13 @@ object AutoSyncEngine {
             store.applyMetaSync(context, metaPlan)
             MetaSync.remap(remote, metaPlan)
         } else remote
-        store.observeRemoteClock(context, SyncDelta.maxRev(incoming))
-        val plan = AutoSyncMerge.plan(store.items, incoming, from, SyncStateStore.syncedIds(context))
+        store.observeRemoteClock(context, maxRevOf(incoming, remoteTombstones))
+        // 删除先落地：合并计划要基于删除后的列表，墓碑同时进本机墓碑表
+        val appliedDeletes = store.applyRemoteDeletions(context, remoteTombstones)
+        val plan = AutoSyncMerge.plan(
+            store.items, incoming, from, SyncStateStore.syncedIds(context),
+            store.tombstoneMap(),
+        )
         store.applyAutoSyncItems(context, plan.adds, plan.updates)
         // 本机较新的记录抬 rev，下一轮增量会把它回传给对方完成收敛
         if (plan.touchIds.isNotEmpty()) store.bumpRevForSync(context, plan.touchIds)
@@ -596,10 +613,17 @@ object AutoSyncEngine {
                 plan.adds.map { it.id } + plan.updates.map { it.id } + plan.touchIds,
             )
         }
+        if (appliedDeletes > 0) {
+            ReminderService.showNotification(
+                context, NOTIFICATION_ID,
+                "同步删除 $appliedDeletes 件物品",
+                "另一台设备删掉的物品已同步删除",
+            )
+        }
         val newConflicts = ConflictStore.add(context, plan.conflicts)
         if (newConflicts > 0) {
             ReminderService.showNotification(
-                context, NOTIFICATION_ID,
+                context, NOTIFICATION_ID + 1,
                 "有 $newConflicts 件物品需要确认",
                 "两台设备各自录入了疑似重复物品，点开后到「设置 → 待合并冲突」手动合并",
             )
@@ -607,6 +631,31 @@ object AutoSyncEngine {
         // 给本地缺图的物品挂上对端引用，文件由本轮/下一轮 fetchMissingImages 拉取
         if (remoteImageIndex.isNotEmpty()) repairImageAttachments(context, remoteImageIndex)
         return plan
+    }
+
+    /** 记录与墓碑的最高 rev，用作水位推进。 */
+    private fun maxRevOf(items: List<ExpiryItem>, tombstones: List<Tombstone>): Long =
+        maxOf(
+            items.maxOfOrNull { it.rev } ?: 0L,
+            tombstones.maxOfOrNull { it.rev } ?: 0L,
+        )
+
+    private fun tombstonesJson(tombstones: List<Tombstone>): JSONArray =
+        JSONArray(tombstones.map { it.toJson() })
+
+    private fun parseTombstones(arr: JSONArray?): List<Tombstone> {
+        if (arr == null) return emptyList()
+        val out = ArrayList<Tombstone>()
+        for (i in 0 until arr.length()) {
+            Tombstone.fromJson(arr.opt(i))?.let { out += it }
+        }
+        return out
+    }
+
+    /** 所有已配对设备都确认收过的墓碑可以裁掉，防止墓碑表无限增长。 */
+    private suspend fun pruneAckedTombstones(context: Context) {
+        val acked = SyncStateStore.minAckedRev(context)
+        if (acked > 0L) ExpiryStore.get().pruneTombstones(context, acked)
     }
 
     /** 只给「本地没有图片」的物品挂引用，不覆盖本机已有图片。 */

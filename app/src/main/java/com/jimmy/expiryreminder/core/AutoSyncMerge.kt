@@ -121,8 +121,11 @@ object AutoSyncMerge {
      * 1. 先按 **共同唯一 ID（syncId）** 认同一条记录，再按本地 id、稳定业务键兜底；
      * 2. 认定为同一条后，比较 **updatedAt**，新者覆盖旧者；时间相同用 rev 破平；
      *    同时把双方的 syncId 收敛到同一个值，后续不再重复匹配；
-     * 3. 不再用「名称相似度」制造人工冲突；名称相似但到期日不同的，就是两件不同物品；
-     * 4. 找不到对应记录才作为新物品入库，保留对方 id / syncId / 图片引用。
+     * 3. 业务键对不上（到期日/数量在一端改过）但同名单一候选时：
+     *    双方都是循环物品且周期/数量一致 → 视为周期推进，自动合并；
+     *    其余挂到待合并冲突由人工确认，不再悄悄插成第二条；
+     * 4. 对端发来的记录若不高于本机删除墓碑的 rev，视为「已删物品被重新加回来」，直接丢弃；
+     * 5. 找不到对应记录才作为新物品入库，保留对方 id / syncId / 图片引用。
      */
     fun plan(
         local: List<ExpiryItem>,
@@ -130,16 +133,30 @@ object AutoSyncMerge {
         from: String,
         /** 兼容旧调用点保留；新规则不再依赖「已同步 id」来避免误判冲突。 */
         syncedIds: Set<String> = emptySet(),
+        /** 本机删除墓碑：挡住「这台设备刚删掉的东西被对端原样加回来」。 */
+        tombstones: Map<String, Tombstone> = emptyMap(),
     ): SyncPlan {
         val bySyncId = HashMap<String, ExpiryItem>()
         val byId = HashMap<String, ExpiryItem>()
         val byKey = HashMap<String, MutableList<ExpiryItem>>()
+        val byName = HashMap<String, MutableList<ExpiryItem>>()
         for (item in local) {
             if (item.syncId.isNotBlank()) bySyncId.putIfAbsent(item.syncId, item)
             byId.putIfAbsent(item.id, item)
             val key = syncKey(item)
             if (key.count { it == '|' } == 2 && key.substringBefore('|').isNotEmpty()) {
                 byKey.getOrPut(key) { ArrayList() }.add(item)
+            }
+            val nameKey = Similarity.normalizeName(item.name)
+            if (nameKey.isNotEmpty()) byName.getOrPut(nameKey) { ArrayList() }.add(item)
+        }
+        // 墓碑索引：id 与 syncId 双通道，物品可能只有其中一边对得上
+        val tombById = HashMap<String, Long>()
+        val tombBySyncId = HashMap<String, Long>()
+        for (t in tombstones.values) {
+            if (t.rev > 0L) {
+                tombById[t.id] = maxOf(tombById[t.id] ?: 0L, t.rev)
+                if (t.syncId.isNotBlank()) tombBySyncId[t.syncId] = maxOf(tombBySyncId[t.syncId] ?: 0L, t.rev)
             }
         }
 
@@ -149,7 +166,19 @@ object AutoSyncMerge {
         val touch = LinkedHashSet<String>()
         var skipped = 0
 
+        fun isResurrected(item: ExpiryItem): Boolean {
+            val revById = item.id.takeIf { it.isNotBlank() }?.let { tombById[it] } ?: 0L
+            val revBySync = item.syncId.takeIf { it.isNotBlank() }?.let { tombBySyncId[it] } ?: 0L
+            val tombRev = maxOf(revById, revBySync)
+            // 对端记录的 rev 不高于墓碑：它还停留在删除前的版本，不能复活
+            return tombRev > 0L && item.rev <= tombRev
+        }
+
         for (incoming in remote) {
+            if (isResurrected(incoming)) {
+                skipped += 1
+                continue
+            }
             var match: ExpiryItem? = incoming.syncId.takeIf { it.isNotBlank() }
                 ?.let { bySyncId[it] }
             if (match == null) match = byId[incoming.id]
@@ -159,6 +188,34 @@ object AutoSyncMerge {
                     match = candidates.maxWithOrNull(
                         compareBy<ExpiryItem> { timestamp(it.updatedAt) }.thenBy { it.rev },
                     )
+                }
+            }
+
+            // 兜底：业务键对不上（到期日/数量在一端被改过）但同名单一候选时，
+            // 优先按「循环物品周期推进」识别为同一件；其余交人工确认，绝不悄悄插成第二条
+            if (match == null) {
+                val nameKey = Similarity.normalizeName(incoming.name)
+                val candidates = byName[nameKey].orEmpty()
+                if (candidates.size == 1) {
+                    val local = candidates.first()
+                    val sameCycle = incoming.repeatEnabled && local.repeatEnabled &&
+                        incoming.shelfLife == local.shelfLife &&
+                        incoming.shelfLifeUnit == local.shelfLifeUnit &&
+                        incoming.quantity == local.quantity
+                    if (sameCycle) {
+                        match = local
+                    } else if (incoming.expireAt != local.expireAt || incoming.quantity != local.quantity) {
+                        conflicts += PendingConflict(
+                            key = local.id + "|" + incoming.id,
+                            local = local,
+                            incoming = incoming,
+                            score = 1.0,
+                            reason = "同名物品但到期日/数量不一致，请确认是同一件还是两件",
+                            from = from,
+                            detectedAt = Dates.nowIsoTimestamp(),
+                        )
+                        continue
+                    }
                 }
             }
 

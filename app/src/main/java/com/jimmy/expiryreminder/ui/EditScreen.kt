@@ -8,6 +8,7 @@ import android.graphics.DashPathEffect
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -834,14 +835,18 @@ fun EditScreen(
                                 )
                             }
                         }
+                        // 与其它字段同一套「白底 + 描边」语言，不再用灰色实底块打断表单节奏
                         Surface(
                             onClick = { toggleRepeat(!repeatEnabled) },
-                            shape = RoundedCornerShape(12.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.surface,
+                            border = androidx.compose.foundation.BorderStroke(
+                                1.dp, MaterialTheme.colorScheme.outlineVariant,
+                            ),
                             modifier = Modifier.fillMaxWidth(),
                         ) {
                             Row(
-                                Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Column(Modifier.weight(1f)) {
@@ -851,8 +856,8 @@ fun EditScreen(
                                         fontWeight = FontWeight.SemiBold,
                                     )
                                     Text(
-                                        if (repeatEnabled) "完成本次后从完成日重新计时"
-                                        else "适用于定期充电、清理、添置等",
+                                        if (repeatEnabled) "完成后自动从完成日重新计时"
+                                        else "适合充电、清理、添置等定期事项",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
@@ -1066,9 +1071,11 @@ fun EditScreen(
                             value = note,
                             onValueChange = { note = it.take(MAX_NOTE) },
                             placeholder = "存放位置、开封日期等",
-                            minLines = 3,
+                            // 默认单行；换行/粘贴多行时随内容撑开，删减后自动缩回，
+                            // animateContentSize 让展开/收起不跳变
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .animateContentSize()
                                 .bringIntoViewRequester(noteBringIntoView)
                                 .onFocusChanged { noteFocused = it.isFocused },
                             showClear = true,
