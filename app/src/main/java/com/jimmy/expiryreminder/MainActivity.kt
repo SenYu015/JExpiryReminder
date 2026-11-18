@@ -193,6 +193,11 @@ class MainActivity : ComponentActivity() {
                     val homeFilter = rememberSaveable(saver = HomeFilterState.Saver) {
                         HomeFilterState()
                     }
+                    // 归档页复用 HomeScreen（archivedMode = true），筛选状态独立一份，
+                    // 与主页互不干扰（主页筛到「药品」时进归档仍看全部归档物品）
+                    val archiveFilter = rememberSaveable(saver = HomeFilterState.Saver) {
+                        HomeFilterState()
+                    }
                     // 主页离开组合（跳编辑页等）时暂存它内部所有 rememberSaveable 状态，
                     // 返回时原样恢复——否则列表滚动位置会丢，回到顶部。
                     // 只包主页：编辑页等二级页每次进入都应是干净的，不恢复上次草稿。
@@ -219,12 +224,46 @@ class MainActivity : ComponentActivity() {
                     var containerWidthPx by remember { mutableFloatStateOf(0f) }
                     val navScope = rememberCoroutineScope()
 
+                    // 二级页栈：归档页也是「主页」的一种，从它进编辑/设置后返回必须回归档页。
+                    // 只存内存，进程重建后从 screen 恢复单页、栈为空则回主页（可接受）。
+                    val backStack = remember { androidx.compose.runtime.mutableStateListOf<Screen>() }
+
+                    fun navigate(target: Screen) {
+                        if (target == screen) return
+                        if (screen != Screen.Home) backStack.add(screen)
+                        exitKind = ExitKind.Enter
+                        screen = target
+                    }
+
+                    /**
+                     * 用 target 顶掉当前页（当前页不留返回栈）。
+                     * OCR 流程的选图页/识别页是一次性过路页：页间跳转必须走这里，
+                     * 否则它们会留在返回历史里，返回键 pop 回识别页会重新识别一遍，
+                     * 表现为「按返回永远出不去、反复识别」。
+                     */
+                    fun navigateReplace(target: Screen) {
+                        if (target == screen) return
+                        exitKind = ExitKind.Enter
+                        screen = target
+                    }
+
+                    /** 返回上一层：栈空即回主页。收起键盘等由各页自己处理。 */
+                    fun navBack(kind: ExitKind) {
+                        val target = backStack.removeLastOrNull() ?: Screen.Home
+                        if (target == screen) return
+                        exitKind = kind
+                        screen = target
+                    }
+
+                    /** 保存/删除完成：清栈直接回主页，别停在归档/设置这些中间层。 */
                     fun navHome(kind: ExitKind) {
                         if (screen == Screen.Home) return
+                        backStack.clear()
                         exitKind = kind
                         screen = Screen.Home
                     }
-                    fun goBack() = navHome(ExitKind.ByButton)
+
+                    fun goBack() = navBack(ExitKind.ByButton)
 
                     fun finishBackDrag(commit: Boolean) {
                         navScope.launch {
@@ -238,7 +277,8 @@ class MainActivity : ComponentActivity() {
                                     ) { v, _ -> backDragProgress = v }
                                 }
                                 exitKind = ExitKind.ByDrag
-                                screen = Screen.Home
+                                // 提交后落回上一层（可能是主页，也可能是归档页）
+                                screen = backStack.removeLastOrNull() ?: Screen.Home
                                 backDragProgress = 0f
                                 backDragActive = false
                             } else {
@@ -256,43 +296,150 @@ class MainActivity : ComponentActivity() {
                         HomeScreen(
                             filter = homeFilter,
                             onAdd = { defaultCategory, defaultSpace ->
-                                screen = Screen.Edit(
+                                navigate(Screen.Edit(
                                     itemId = null,
                                     defaultCategory = defaultCategory,
                                     defaultSpace = defaultSpace,
-                                )
+                                ))
                             },
                             onOcr = { defaultCategory, defaultSpace ->
-                                screen = Screen.PickImages(
+                                navigate(Screen.PickImages(
                                     defaultCategory = defaultCategory,
                                     defaultSpace = defaultSpace,
-                                )
+                                ))
                             },
-                            onEdit = { id -> screen = Screen.Edit(id) },
-                            onSettings = { screen = Screen.Settings },
-                            onCategories = { screen = Screen.Categories },
-                            onSpaces = { screen = Screen.Spaces },
-                            onShare = { ids -> screen = Screen.Transfer(ids) },
+                            onEdit = { id -> navigate(Screen.Edit(id)) },
+                            onSettings = { navigate(Screen.Settings) },
+                            onCategories = { navigate(Screen.Categories) },
+                            onSpaces = { navigate(Screen.Spaces) },
+                            onArchive = { navigate(Screen.Archive) },
+                            onShare = { ids -> navigate(Screen.Transfer(ids)) },
                         )
+                    }
+
+                    // 归档页：与主页同一套 HomeScreen（archivedMode = true），
+                    // 新增/空间/分享等入口在归档模式下由页面内部隐藏，传空实现即可
+                    val archiveContent: @Composable () -> Unit = {
+                        HomeScreen(
+                            filter = archiveFilter,
+                            archivedMode = true,
+                            onBack = { goBack() },
+                            onAdd = { _, _ -> },
+                            onOcr = { _, _ -> },
+                            onEdit = { id -> navigate(Screen.Edit(id)) },
+                            onSettings = { navigate(Screen.Settings) },
+                            onCategories = {},
+                            onSpaces = {},
+                            onArchive = {},
+                            onShare = {},
+                        )
+                    }
+
+                    // 单页内容：AnimatedContent 与拖拽返回的底层共用同一套分支——
+                    // 返回目标既可能是主页，也可能是归档页
+                    val screenContent: @Composable (Screen) -> Unit = { target ->
+                    when (val s = target) {
+                        is Screen.Home -> homeStateHolder.SaveableStateProvider(key = "home") {
+                            homeContent()
+                        }
+                        is Screen.PickImages -> PickImagesScreen(
+                            onBack = { goBack() },
+                            // 从识别页返回时带回归前已选照片（initialUris 存字符串，转回 Uri）
+                            initialUris = s.initialUris.mapNotNull {
+                                runCatching { Uri.parse(it) }.getOrNull()
+                            },
+                            onConfirm = { uris ->
+                                // 选图页（带已选照片）必须留在栈里，识别页返回才有落脚页。
+                                // 注意：从主页进的选图页不在栈里（navigate 不压主页锚点），
+                                // 之前只做「栈顶替换」会导致识别中按返回直接跳回主页。
+                                val withUris = s.copy(initialUris = uris.map { it.toString() })
+                                if (backStack.lastOrNull() is Screen.PickImages) {
+                                    backStack[backStack.lastIndex] = withUris
+                                } else {
+                                    backStack.add(withUris)
+                                }
+                                navigateReplace(Screen.OcrProgress(
+                                    defaultCategory = s.defaultCategory,
+                                    defaultSpace = s.defaultSpace,
+                                    uris = uris.map { it.toString() },
+                                ))
+                            },
+                        )
+                        is Screen.OcrProgress -> OcrProgressScreen(
+                            uris = s.uris.mapNotNull { runCatching { Uri.parse(it) }.getOrNull() },
+                            onCancel = {
+                                // 识别中返回：弹栈回选图页（栈顶已带已选照片），不再压新页
+                                goBack()
+                            },
+                            onFinish = { draft ->
+                                // 识别完成：把选图页/识别页从返回历史里全部摘掉，
+                                // 编辑页保存或返回都直接回主页，不会再掉回识别页重新识别
+                                backStack.removeAll { it is Screen.PickImages || it is Screen.OcrProgress }
+                                navigateReplace(Screen.Edit(
+                                    itemId = null,
+                                    defaultCategory = s.defaultCategory,
+                                    defaultSpace = s.defaultSpace,
+                                    prefill = draft,
+                                ))
+                            },
+                        )
+                        // 按 itemId 分组：从「新增」切到「编辑某条已有物品」时仍停在同一个 when 分支、
+                        // 同一个调用点，不给 key 的话 Compose 会复用上页的组合状态，
+                        // 编辑页里的 remember 字段初值不会按新 existing 重新取，会显示上一页的草稿。
+                        is Screen.Edit -> key(s.itemId ?: "new") {
+                            EditScreen(
+                                itemId = s.itemId,
+                                defaultCategory = s.defaultCategory,
+                                defaultSpace = s.defaultSpace,
+                                prefill = s.prefill,
+                                // 新增时点选「相似物品」里的某条，直接切到那一条的编辑页
+                                onEditExisting = { id -> navigate(Screen.Edit(id)) },
+                                onDone = { goBack() },
+                                // 保存/删除成功：淡入淡出回到来源页（主页或归档页），
+                                // 从归档点进去编辑的物品保存后仍回归档，不会莫名跳回主页
+                                onSaved = { navBack(ExitKind.AfterSave) },
+                            )
+                        }
+                        is Screen.Settings -> SettingsScreen(
+                            onBack = { goBack() },
+                            onTransfer = { navigate(Screen.Transfer(emptyList())) },
+                            onConflicts = { navigate(Screen.Conflicts) },
+                        )
+                        is Screen.Conflicts -> ConflictsScreen(
+                            onBack = { goBack() },
+                        )
+                        is Screen.Categories -> CategoryScreen(
+                            onBack = { goBack() },
+                        )
+                        is Screen.Spaces -> SpaceScreen(
+                            onBack = { goBack() },
+                        )
+                        is Screen.Archive -> homeStateHolder.SaveableStateProvider(key = "archive") {
+                            archiveContent()
+                        }
+                        is Screen.Transfer -> TransferScreen(
+                            itemIds = s.itemIds,
+                            onBack = { goBack() },
+                        )
+                    }
                     }
 
                     // 返回统一走按钮同款转场：二级页拦截返回（手势/返回键），
                     // 主页不拦截，系统返回直接回桌面并保留平台动画。
                     // 拖拽进行中禁用 BackHandler，避免系统返回与拖拽提交打架。
                     BackHandler(enabled = screen != Screen.Home && !backDragActive) {
-                        navHome(ExitKind.ByButton)
+                        goBack()
                     }
                     Box(
                         Modifier
                             .fillMaxSize()
                             .onGloballyPositioned { containerWidthPx = it.size.width.toFloat() },
                     ) {
-                        // 拖拽返回时，底层渲染主页（恢复上次状态）+ 随进度减弱的压暗层
+                        // 拖拽返回时，底层渲染「返回目标」（栈顶）+ 随进度减弱的压暗层。
+                        // 从归档页进的编辑页，拖拽露出的应是归档列表而不是主页。
                         if (backDragActive && screen != Screen.Home) {
                             Box(Modifier.fillMaxSize()) {
-                                homeStateHolder.SaveableStateProvider(key = "home") {
-                                    homeContent()
-                                }
+                                screenContent(backStack.lastOrNull() ?: Screen.Home)
                                 Box(
                                     Modifier
                                         .fillMaxSize()
@@ -310,99 +457,32 @@ class MainActivity : ComponentActivity() {
                                 translationX = backDragProgress * containerWidthPx
                             },
                             transitionSpec = {
-                                if (targetState !is Screen.Home) {
-                                    // 进二级页：保留短距离横向层级感
-                                    (slideInHorizontally(tween(220)) { it / 10 } +
-                                        fadeIn(tween(180))) togetherWith
-                                        (slideOutHorizontally(tween(220)) { -it / 16 } +
-                                            fadeOut(tween(140)))
-                                } else {
-                                    when (exitKind) {
-                                        ExitKind.ByButton ->
-                                            // 返回（按钮或系统手势）：整页向右滑出、新页淡入
-                                            fadeIn(tween(200)) togetherWith
-                                                (slideOutHorizontally(tween(240)) { it } +
-                                                    fadeOut(tween(220)))
-                                        ExitKind.ByDrag ->
-                                            // 跟手返回提交：页面已拖出屏外，新旧页瞬时互换
-                                            fadeIn(snap()) togetherWith slideOutHorizontally(snap())
-                                        else ->
-                                            // 保存/删除完成：平台式淡入淡出，不模拟返回手势
-                                            fadeIn(tween(180)) togetherWith fadeOut(tween(140))
-                                    }
+                                // 方向只认 exitKind：返回目标不一定是主页（也可能是归档页），
+                                // 不能再拿「目标是不是 Home」判断进出
+                                when (exitKind) {
+                                    ExitKind.Enter ->
+                                        // 进二级页：保留短距离横向层级感
+                                        (slideInHorizontally(tween(220)) { it / 10 } +
+                                            fadeIn(tween(180))) togetherWith
+                                            (slideOutHorizontally(tween(220)) { -it / 16 } +
+                                                fadeOut(tween(140)))
+                                    ExitKind.ByButton ->
+                                        // 返回（按钮或系统手势）：整页向右滑出、新页淡入
+                                        fadeIn(tween(200)) togetherWith
+                                            (slideOutHorizontally(tween(240)) { it } +
+                                                fadeOut(tween(220)))
+                                    ExitKind.ByDrag ->
+                                        // 跟手返回提交：页面已拖出屏外，新旧页瞬时互换
+                                        fadeIn(snap()) togetherWith slideOutHorizontally(snap())
+                                    ExitKind.AfterSave ->
+                                        // 保存/删除完成：平台式淡入淡出，不模拟返回手势
+                                        fadeIn(tween(180)) togetherWith fadeOut(tween(140))
                                 }
                             },
                             label = "screen",
                         ) { target ->
-                    when (val s = target) {
-                        is Screen.Home -> homeStateHolder.SaveableStateProvider(key = "home") {
-                            homeContent()
+                            screenContent(target)
                         }
-                        is Screen.PickImages -> PickImagesScreen(
-                            onBack = { goBack() },
-                            onConfirm = { uris ->
-                                screen = Screen.OcrProgress(
-                                    defaultCategory = s.defaultCategory,
-                                    defaultSpace = s.defaultSpace,
-                                    uris = uris.map { it.toString() },
-                                )
-                            },
-                        )
-                        is Screen.OcrProgress -> OcrProgressScreen(
-                            uris = s.uris.mapNotNull { runCatching { Uri.parse(it) }.getOrNull() },
-                            onCancel = {
-                                // 回选图页，把已选照片带回去，不白拍
-                                screen = Screen.PickImages(
-                                    defaultCategory = s.defaultCategory,
-                                    defaultSpace = s.defaultSpace,
-                                    initialUris = s.uris,
-                                )
-                            },
-                            onFinish = { draft ->
-                                screen = Screen.Edit(
-                                    itemId = null,
-                                    defaultCategory = s.defaultCategory,
-                                    defaultSpace = s.defaultSpace,
-                                    prefill = draft,
-                                )
-                            },
-                        )
-                        // 按 itemId 分组：从「新增」切到「编辑某条已有物品」时仍停在同一个 when 分支、
-                        // 同一个调用点，不给 key 的话 Compose 会复用上页的组合状态，
-                        // 编辑页里的 remember 字段初值不会按新 existing 重新取，会显示上一页的草稿。
-                        is Screen.Edit -> key(s.itemId ?: "new") {
-                            EditScreen(
-                                itemId = s.itemId,
-                                defaultCategory = s.defaultCategory,
-                                defaultSpace = s.defaultSpace,
-                                prefill = s.prefill,
-                                // 新增时点选「相似物品」里的某条，直接切到那一条的编辑页
-                                onEditExisting = { id -> screen = Screen.Edit(id) },
-                                onDone = { goBack() },
-                                // 本分支：保存/删除成功走平台式淡入淡出，不模拟返回手势
-                                onSaved = { navHome(ExitKind.AfterSave) },
-                            )
-                        }
-                        is Screen.Settings -> SettingsScreen(
-                            onBack = { goBack() },
-                            onTransfer = { screen = Screen.Transfer(emptyList()) },
-                            onConflicts = { screen = Screen.Conflicts },
-                        )
-                        is Screen.Conflicts -> ConflictsScreen(
-                            onBack = { goBack() },
-                        )
-                        is Screen.Categories -> CategoryScreen(
-                            onBack = { goBack() },
-                        )
-                        is Screen.Spaces -> SpaceScreen(
-                            onBack = { goBack() },
-                        )
-                        is Screen.Transfer -> TransferScreen(
-                            itemIds = s.itemIds,
-                            onBack = { goBack() },
-                        )
-                    }
-                    }
                         // 左边缘跟手返回手势条：最顶层铺满左侧 24dp，
                         // 系统手势排除后由它驱动上面的拖拽状态机
                         BackDragStrip(
@@ -448,6 +528,9 @@ sealed interface Screen {
     /** 空间管理（独立页面）。 */
     data object Spaces : Screen
 
+    /** 归档页：已归档物品列表，可调回或删除。 */
+    data object Archive : Screen
+
     /** 跨设备传输：从首页多选「分享」进来时带 [itemIds]，从设置进来时为空。 */
     data class Transfer(val itemIds: List<String> = emptyList()) : Screen
 
@@ -483,6 +566,7 @@ private val ScreenSaver = mapSaver(
             is Screen.Conflicts -> mapOf("name" to "conflicts")
             is Screen.Categories -> mapOf("name" to "categories")
             is Screen.Spaces -> mapOf("name" to "spaces")
+            is Screen.Archive -> mapOf("name" to "archive")
             is Screen.Transfer -> mapOf(
                 "name" to "transfer",
                 "ids" to ArrayList(screen.itemIds),
@@ -508,6 +592,7 @@ private val ScreenSaver = mapSaver(
             "conflicts" -> Screen.Conflicts
             "categories" -> Screen.Categories
             "spaces" -> Screen.Spaces
+            "archive" -> Screen.Archive
             "transfer" -> Screen.Transfer(
                 (map["ids"] as? List<*>)?.mapNotNull { it as? String }.orEmpty(),
             )

@@ -203,15 +203,41 @@ class ExpiryStore private constructor() {
             .sortedBy { it.expireAt }
     }
 
+    /** 该空间下的物品总条数（含归档）：空间管理页的「占用」与删除空间的提示用。 */
     fun itemCountInSpace(spaceId: String): Int =
         if (spaceId == Spaces.ALL) items.size
         else items.count { resolveSpaceId(it.spaceId) == spaceId }
+
+    /**
+     * 该空间下「可操作」的物品条数（不含归档），与 [itemsInSpace] 严格同口径。
+     * 主页空间下拉、跨设备传输的空间选择都要用这个——归档物品不出现在列表里，
+     * 也不参与分享，数字必须与点进去后看到的一致。
+     */
+    fun activeCountInSpace(spaceId: String): Int =
+        if (spaceId == Spaces.ALL) items.count { !it.archived }
+        else items.count { !it.archived && resolveSpaceId(it.spaceId) == spaceId }
 
     // ---------------------------------------------------------------- 物品
 
     /** 未归档物品，按到期日期升序。 */
     fun activeItems(): List<ExpiryItem> =
         items.filter { !it.archived }.sortedBy { it.expireAt }
+
+    /** 已归档物品，按到期日期升序。归档页列表用。 */
+    fun archivedItems(): List<ExpiryItem> =
+        items.filter { it.archived }.sortedBy { it.expireAt }
+
+    /** 归档模式的空间筛选：与 [itemsInSpace] 同一套空间口径，「全部空间」= 所有归档物品。 */
+    fun archivedItemsInSpace(spaceId: String): List<ExpiryItem> = when (spaceId) {
+        Spaces.ALL -> archivedItems()
+        else -> archivedItems().filter { resolveSpaceId(it.spaceId) == spaceId }
+    }
+
+    /** 空间下拉里的条数：归档模式按归档物品计数，与列表口径一致。 */
+    fun archivedCountInSpace(spaceId: String): Int = when (spaceId) {
+        Spaces.ALL -> items.count { it.archived }
+        else -> items.count { it.archived && resolveSpaceId(it.spaceId) == spaceId }
+    }
 
     fun statusOf(item: ExpiryItem): ExpiryStatus {
         val days = Dates.daysUntil(item.expireAt) ?: return ExpiryStatus.normal
@@ -701,6 +727,36 @@ class ExpiryStore private constructor() {
                 else {
                     changed += 1
                     item.copy(category = target, updatedAt = now)
+                }
+            }
+            if (changed > 0) {
+                _state.value = _state.value.copy(items = list)
+                persistLocked(context)
+            }
+        }
+        return changed
+    }
+
+    /**
+     * 批量归档 / 调回：只改 [ExpiryItem.archived] 标记，不动图片与提醒记录。
+     * 归档变化会刷新 updatedAt（是一次真实的本机修改），经统一入口分配 rev 参与同步。
+     * 返回真正发生变化的条数。
+     */
+    suspend fun setItemsArchived(
+        context: Context,
+        ids: Collection<String>,
+        archived: Boolean,
+    ): Int {
+        if (ids.isEmpty()) return 0
+        val pick = ids.toSet()
+        var changed = 0
+        mutex.withLock {
+            val now = Dates.nowIsoTimestamp()
+            val list = _state.value.items.map { item ->
+                if (item.id !in pick || item.archived == archived) item
+                else {
+                    changed += 1
+                    item.copy(archived = archived, updatedAt = now)
                 }
             }
             if (changed > 0) {

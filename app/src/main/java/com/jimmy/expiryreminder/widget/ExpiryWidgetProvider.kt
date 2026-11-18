@@ -51,13 +51,24 @@ data class WidgetSnapshot(
 object WidgetData {
     private const val MAX_ROWS = 60
 
+    /**
+     * 解析结果缓存：data.json 的 (mtime, size) 与深浅色都没变时直接复用。
+     * RemoteViewsFactory.onDataSetChanged 会在每次列表刷新/滚动时被调用，
+     * 不缓存的话每条都要重新解析整份 data.json（几千条时明显卡顿）。
+     */
+    private var cacheStamp: String? = null
+    private var cache: WidgetSnapshot? = null
+
+    @Synchronized
     fun load(context: Context): WidgetSnapshot {
         val file = ImageStore.dataFile(context)
         if (!file.exists()) return WidgetSnapshot(emptyList(), 0, 0)
+        val dark = WidgetTheme.isDark(context)
+        val stamp = "${file.lastModified()}|${file.length()}|$dark"
+        cache?.let { if (stamp == cacheStamp) return it }
         val root = runCatching { JSONObject(file.readText()) }.getOrNull()
             ?: return WidgetSnapshot(emptyList(), 0, 0)
         val arr = root.optJSONArray("items") ?: return WidgetSnapshot(emptyList(), 0, 0)
-        val dark = WidgetTheme.isDark(context)
 
         // 分类色条必须和软件内部一致：内置分类颜色 + 用户改色覆盖 + 自定义分类颜色。
         // 不能用到期状态色代替，状态色只用于行底色与剩余天数。
@@ -133,11 +144,14 @@ object WidgetData {
                 )
             }
         }
-        return WidgetSnapshot(
+        val snapshot = WidgetSnapshot(
             rows = rows,
             countdownCount = items.count { !it.repeatEnabled },
             cycleCount = items.count { it.repeatEnabled },
         )
+        cacheStamp = stamp
+        cache = snapshot
+        return snapshot
     }
 }
 

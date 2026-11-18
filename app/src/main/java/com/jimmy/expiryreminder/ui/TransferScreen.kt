@@ -332,7 +332,7 @@ fun TransferScreen(itemIds: List<String>, onBack: () -> Unit) {
                                 for (space in store.spaceOptions()) {
                                     androidx.compose.material3.DropdownMenuItem(
                                         text = { Text(space.label) },
-                                        trailingIcon = { Text("${store.itemCountInSpace(space.id)}", style = MaterialTheme.typography.labelSmall) },
+                                        trailingIcon = { Text("${store.activeCountInSpace(space.id)}", style = MaterialTheme.typography.labelSmall) },
                                         onClick = {
                                             syncSpaceId = space.id
                                             syncSpaceMenu = false
@@ -342,7 +342,7 @@ fun TransferScreen(itemIds: List<String>, onBack: () -> Unit) {
                                 androidx.compose.material3.HorizontalDivider()
                                 androidx.compose.material3.DropdownMenuItem(
                                     text = { Text(Spaces.UNASSIGNED_LABEL) },
-                                    trailingIcon = { Text("${store.itemCountInSpace("")}", style = MaterialTheme.typography.labelSmall) },
+                                    trailingIcon = { Text("${store.activeCountInSpace("")}", style = MaterialTheme.typography.labelSmall) },
                                     onClick = {
                                         syncSpaceId = ""
                                         syncSpaceMenu = false

@@ -69,6 +69,10 @@ object ReminderService {
     /** 主闹钟后 90 秒的备份闹钟：ROM 吞掉主闹钟时兜底，去重键保证不会重复打扰。 */
     const val BACKUP_DELAY_MS = 90_000L
 
+    /** 「通知 id → 物品 id」映射的偏好名（归档/删除时按物品撤销通知用）。 */
+    private const val PREFS_POSTED = "reminder_posted"
+    private const val KEY_POSTED = "posted"
+
     data class PlannedReminder(
         val key: String,
         val itemId: String,
@@ -372,9 +376,21 @@ object ReminderService {
         )
     }
 
-    /** 通知 id（同时是闹钟 requestCode）。 */
-    fun showNotification(context: Context, id: Int, title: String, body: String) {
+    /**
+     * 通知 id（同时是闹钟 requestCode）。
+     *
+     * [itemId] 非空时把「通知 id → 物品」记进偏好，归档/删除后可以按物品撤销通知栏里
+     * 已经发出去的那条（id 是 hash，反查不回来，只能落映射）。
+     */
+    fun showNotification(
+        context: Context,
+        id: Int,
+        title: String,
+        body: String,
+        itemId: String? = null,
+    ) {
         if (!hasNotificationPermission(context)) return
+        rememberPosted(context, id, itemId)
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(com.jimmy.expiryreminder.R.drawable.ic_stat_alarm)
@@ -404,6 +420,36 @@ object ReminderService {
             .setContentIntent(launchAppPendingIntent(context))
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
+
+    /** 记录「通知 id → 物品 id」，供归档/删除后撤销通知。一个 id 只保留最新一条映射。 */
+    private fun rememberPosted(context: Context, id: Int, itemId: String?) {
+        if (itemId.isNullOrEmpty()) return
+        val sp = context.getSharedPreferences(PREFS_POSTED, Context.MODE_PRIVATE)
+        val entries = sp.getStringSet(KEY_POSTED, emptySet()).orEmpty().toMutableSet()
+        entries.removeAll { it.substringBefore('|') == id.toString() }
+        entries.add("$id|$itemId")
+        sp.edit().putStringSet(KEY_POSTED, entries).apply()
+    }
+
+    /**
+     * 撤销这些物品在通知栏里还挂着的提醒。
+     * 归档物品不该再提醒，删除物品更不该留着一条指向已删数据的通知——
+     * 两者都走这里（闹钟本身由随后的 [syncScheduled] 整包重排清掉）。
+     */
+    fun cancelNotificationsFor(context: Context, itemIds: Collection<String>) {
+        if (itemIds.isEmpty()) return
+        val sp = context.getSharedPreferences(PREFS_POSTED, Context.MODE_PRIVATE)
+        val entries = sp.getStringSet(KEY_POSTED, emptySet()).orEmpty()
+        if (entries.isEmpty()) return
+        val targets = itemIds.toSet()
+        val hit = entries.filter { it.substringAfter('|') in targets }
+        if (hit.isEmpty()) return
+        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        for (entry in hit) {
+            entry.substringBefore('|').toIntOrNull()?.let { runCatching { manager.cancel(it) } }
+        }
+        sp.edit().putStringSet(KEY_POSTED, (entries - hit.toSet())).apply()
+    }
 
     /** 只重发流体云汇总，不重排闹钟；设置页「重新发布」用这个，避免无谓地清建全部闹钟。 */
     fun repostLiveSummary(context: Context, store: ExpiryStore, enabled: Boolean) {
@@ -689,6 +735,7 @@ object ReminderService {
         val hits = mutableListOf<String>()
         var firstId = 0
         var firstBody = ""
+        var firstItemId: String? = null
 
         for (item in store.activeItems()) {
             val days = Dates.daysUntil(item.expireAt) ?: continue
@@ -699,6 +746,7 @@ object ReminderService {
             if (hits.isEmpty()) {
                 firstId = id
                 firstBody = describe(item, days)
+                firstItemId = item.id
             }
             hits.add(key)
         }
@@ -706,7 +754,7 @@ object ReminderService {
         if (hits.isEmpty()) return 0
         val detail =
             if (hits.size == 1) firstBody else "${hits.size} 件物品即将到期，记得处理"
-        showNotification(context, firstId, "到期提醒", detail)
+        showNotification(context, firstId, "到期提醒", detail, firstItemId)
         store.markNotified(context, hits)
         return hits.size
     }
