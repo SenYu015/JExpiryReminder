@@ -37,6 +37,7 @@ class ExpiryStore private constructor() {
         val revision: Long = 0,
         /** 各分类新增物品时预填的提前提醒天数（键 = 分类 id；没有键 = 无默认）。 */
         val categoryRemindDefaults: Map<String, List<Int>> = emptyMap(),
+        /** 删除墓碑（键 = 物品 id）：删除动作要经同步传播到另一台设备。 */
     )
 
     private val _state = MutableStateFlow(State())
@@ -52,11 +53,14 @@ class ExpiryStore private constructor() {
     /** 上一次落盘时每条记录的内容指纹（不含 rev）：用于在统一入口识别「真的改过」。 */
     private val lastHashes = HashMap<String, Int>()
 
+    /** 内容指纹刻意排除 rev，避免「只改标记」被当成一次新修改。 */
     /** 内容指纹用于判断「本机有没有改过」；排除同步元字段，避免补发 syncId 造成 rev 震荡。 */
     private fun contentHash(item: ExpiryItem): Int =
         item.copy(rev = 0L, syncId = "").toJson().toString().hashCode()
 
     companion object {
+        /** 墓碑留存上限：超过后从最旧的开始丢，防止极端情况下无限增长。 */
+
         @Volatile
         private var instance: ExpiryStore? = null
 
@@ -202,15 +206,41 @@ class ExpiryStore private constructor() {
             .sortedBy { it.expireAt }
     }
 
+    /** 该空间下的物品总条数（含归档）：空间管理页的「占用」与删除空间的提示用。 */
     fun itemCountInSpace(spaceId: String): Int =
         if (spaceId == Spaces.ALL) items.size
         else items.count { resolveSpaceId(it.spaceId) == spaceId }
+
+    /**
+     * 该空间下「可操作」的物品条数（不含归档），与 [itemsInSpace] 严格同口径。
+     * 主页空间下拉、跨设备传输的空间选择都要用这个——归档物品不出现在列表里，
+     * 也不参与分享，数字必须与点进去后看到的一致。
+     */
+    fun activeCountInSpace(spaceId: String): Int =
+        if (spaceId == Spaces.ALL) items.count { !it.archived }
+        else items.count { !it.archived && resolveSpaceId(it.spaceId) == spaceId }
 
     // ---------------------------------------------------------------- 物品
 
     /** 未归档物品，按到期日期升序。 */
     fun activeItems(): List<ExpiryItem> =
         items.filter { !it.archived }.sortedBy { it.expireAt }
+
+    /** 已归档物品，按到期日期升序。归档页列表用。 */
+    fun archivedItems(): List<ExpiryItem> =
+        items.filter { it.archived }.sortedBy { it.expireAt }
+
+    /** 归档模式的空间筛选：与 [itemsInSpace] 同一套空间口径，「全部空间」= 所有归档物品。 */
+    fun archivedItemsInSpace(spaceId: String): List<ExpiryItem> = when (spaceId) {
+        Spaces.ALL -> archivedItems()
+        else -> archivedItems().filter { resolveSpaceId(it.spaceId) == spaceId }
+    }
+
+    /** 空间下拉里的条数：归档模式按归档物品计数，与列表口径一致。 */
+    fun archivedCountInSpace(spaceId: String): Int = when (spaceId) {
+        Spaces.ALL -> items.count { it.archived }
+        else -> items.count { it.archived && resolveSpaceId(it.spaceId) == spaceId }
+    }
 
     fun statusOf(item: ExpiryItem): ExpiryStatus {
         val days = Dates.daysUntil(item.expireAt) ?: return ExpiryStatus.normal
@@ -233,13 +263,16 @@ class ExpiryStore private constructor() {
         mutex.withLock {
             if (_state.value.loaded) return
             val file = ImageStore.dataFile(context)
+            // 主文件损坏（写一半、被外部改坏）时退回上一次成功写入的 .bak，并把它扶正
             var stored: JSONObject? = null
-            if (file.exists()) {
-                try {
-                    stored = JSONObject(file.readText())
-                } catch (_: Exception) {
-                    stored = null
+            for (candidate in listOf(file, AtomicFiles.backupOf(file))) {
+                if (!candidate.exists()) continue
+                val parsed = runCatching { JSONObject(candidate.readText()) }.getOrNull() ?: continue
+                stored = parsed
+                if (candidate != file) {
+                    runCatching { candidate.copyTo(file, overwrite = true) }
                 }
+                break
             }
             val rawItems = stored?.optJSONArray("items")
             val normalized = if (rawItems != null) {
@@ -420,7 +453,7 @@ class ExpiryStore private constructor() {
             revision = next.revision,
             categoryRemindDefaults = next.categoryRemindDefaults,
         )
-        file.writeText(payload.toJson().toString(2))
+        AtomicFiles.writeText(file, payload.toJson().toString(2))
     }
 
     /** 供导入后整体重载。 */
@@ -445,6 +478,34 @@ class ExpiryStore private constructor() {
             _state.value = _state.value.copy(items = _state.value.items + item)
             persistLocked(context)
         }
+    }
+
+    /**
+     * 循环物品「完成本次」：以实际完成日为新起点推进周期，并清空本周期提醒记录。
+     * 返回新的到期日；非循环物品、周期不合法或 id 不存在时返回 null（不写盘）。
+     */
+    suspend fun completeCycle(
+        context: Context,
+        id: String,
+        today: java.time.LocalDate = java.time.LocalDate.now(),
+    ): String? {
+        var nextExpire: String? = null
+        mutex.withLock {
+            val list = _state.value.items.toMutableList()
+            val index = list.indexOfFirst { it.id == id }
+            if (index < 0) return@withLock
+            val current = list[index]
+            if (!current.repeatEnabled || current.shelfLife <= 0) return@withLock
+            val advanced = ExpiryCalc.advanceCycle(
+                current, today, Dates.nowIsoTimestamp(),
+            )
+            if (advanced.expireAt == current.expireAt) return@withLock
+            nextExpire = advanced.expireAt
+            list[index] = advanced
+            _state.value = _state.value.copy(items = list)
+            persistLocked(context)
+        }
+        return nextExpire
     }
 
     suspend fun updateItem(context: Context, id: String, patch: ExpiryItem) {
@@ -565,6 +626,36 @@ class ExpiryStore private constructor() {
                 else {
                     changed += 1
                     item.copy(category = target, updatedAt = now)
+                }
+            }
+            if (changed > 0) {
+                _state.value = _state.value.copy(items = list)
+                persistLocked(context)
+            }
+        }
+        return changed
+    }
+
+    /**
+     * 批量归档 / 调回：只改 [ExpiryItem.archived] 标记，不动图片与提醒记录。
+     * 归档变化会刷新 updatedAt（是一次真实的本机修改），经统一入口分配 rev。
+     * 返回真正发生变化的条数。
+     */
+    suspend fun setItemsArchived(
+        context: Context,
+        ids: Collection<String>,
+        archived: Boolean,
+    ): Int {
+        if (ids.isEmpty()) return 0
+        val pick = ids.toSet()
+        var changed = 0
+        mutex.withLock {
+            val now = Dates.nowIsoTimestamp()
+            val list = _state.value.items.map { item ->
+                if (item.id !in pick || item.archived == archived) item
+                else {
+                    changed += 1
+                    item.copy(archived = archived, updatedAt = now)
                 }
             }
             if (changed > 0) {
@@ -858,7 +949,7 @@ class ExpiryStore private constructor() {
 
     /** 把合并后的 data.json 写回磁盘（导入合并模式用）。 */
     suspend fun applyMergedDataJson(context: Context, mergedJson: String) {
-        ImageStore.dataFile(context).writeText(mergedJson)
+        AtomicFiles.writeText(ImageStore.dataFile(context), mergedJson)
         reload(context)
     }
 }

@@ -45,12 +45,12 @@ class AlarmReceiver : BroadcastReceiver() {
             try {
                 val store = ExpiryStore.get()
                 store.load(appContext)
-                // 前台补发可能已经推过同一条，这里按去重键拦住，避免重复打扰
-                val alreadyNotified = store.items
-                    .firstOrNull { it.id == itemId }
-                    ?.notifiedKeys?.contains(key) == true
-                if (!alreadyNotified) {
-                    showNotification(appContext, id, body)
+                // 前台补发可能已经推过同一条，这里按去重键拦住，避免重复打扰；
+                // 物品已归档/已删除时同样不再弹（归档瞬间正好投递过来的闹钟属于竞态，这里兜住）
+                val item = store.items.firstOrNull { it.id == itemId }
+                val alreadyNotified = item?.notifiedKeys?.contains(key) == true
+                if (item != null && !item.archived && !alreadyNotified) {
+                    showNotification(appContext, id, body, itemId)
                     store.markNotified(appContext, listOf(key))
                 }
                 // 链式补排：延迟几分钟再整包重排，别在这里立刻排（会吃掉同一时刻还没投递的闹钟）
@@ -73,9 +73,9 @@ class AlarmReceiver : BroadcastReceiver() {
         }
     }
 
-    private fun showNotification(context: Context, id: Int, body: String) {
+    private fun showNotification(context: Context, id: Int, body: String, itemId: String) {
         ReminderService.createChannel(context)
-        ReminderService.showNotification(context, id, "到期提醒", body)
+        ReminderService.showNotification(context, id, "到期提醒", body, itemId)
     }
 }
 
@@ -89,6 +89,7 @@ internal suspend fun rescheduleAll(context: Context) {
     ReminderService.syncScheduled(
         context, store,
         settings.notifyEnabled.value, settings.notifyTime.value, settings.useAlarmClock.value,
+        settings.liveUpdateEnabled.value,
     )
 }
 
