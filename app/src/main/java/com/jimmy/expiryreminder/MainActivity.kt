@@ -42,12 +42,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.jimmy.expiryreminder.core.ExpiryStore
 import com.jimmy.expiryreminder.core.SettingsStore
 import com.jimmy.expiryreminder.notify.ReminderService
 import com.jimmy.expiryreminder.ui.AppTheme
-import com.jimmy.expiryreminder.ui.BackDragStrip
+import com.jimmy.expiryreminder.ui.GestureExclusionStrip
+import com.jimmy.expiryreminder.ui.backDragGesture
 import com.jimmy.expiryreminder.ui.CategoryScreen
 import com.jimmy.expiryreminder.ui.EditScreen
 import com.jimmy.expiryreminder.ui.HomeFilterState
@@ -221,6 +223,10 @@ class MainActivity : ComponentActivity() {
                         navSettled = true
                     }
                     var containerWidthPx by remember { mutableFloatStateOf(0f) }
+                    // 左边缘手势区宽度（px），与 GestureExclusionStrip 的 32dp 对齐
+                    val stripWidthPx = with(androidx.compose.ui.platform.LocalDensity.current) {
+                        32.dp.toPx()
+                    }
                     val navScope = rememberCoroutineScope()
 
                     // 二级页栈：归档页也是「主页」的一种，从它进编辑/设置后返回必须回归档页。
@@ -428,7 +434,19 @@ class MainActivity : ComponentActivity() {
                     Box(
                         Modifier
                             .fillMaxSize()
-                            .onGloballyPositioned { containerWidthPx = it.size.width.toFloat() },
+                            .onGloballyPositioned { containerWidthPx = it.size.width.toFloat() }
+                            // 左边缘拖拽返回：挂在根容器上检测（见 GestureExclusionStrip 注释，
+                            // 之前放在覆盖 Box 上会吞掉下方控件的点击），按下点在左 32dp 内才生效
+                            .backDragGesture(
+                                enabled = screen != Screen.Home && navSettled && containerWidthPx > 0f,
+                                stripWidthPx = stripWidthPx,
+                                screenWidthPx = containerWidthPx,
+                                onDrag = { pr ->
+                                    backDragActive = true
+                                    backDragProgress = pr
+                                },
+                                onFinish = { commit -> finishBackDrag(commit) },
+                            ),
                     ) {
                         // 拖拽返回时，底层渲染「返回目标」（栈顶）+ 随进度减弱的压暗层。
                         // 从归档页进的编辑页，拖拽露出的应是归档列表而不是主页。
@@ -478,18 +496,9 @@ class MainActivity : ComponentActivity() {
                         ) { target ->
                             screenContent(target)
                         }
-                        // 左边缘跟手返回手势条：最顶层铺满左侧 24dp，
-                        // 系统手势排除后由它驱动上面的拖拽状态机
-                        BackDragStrip(
-                            enabled = screen != Screen.Home && navSettled && containerWidthPx > 0f,
-                            screenWidthPx = containerWidthPx,
-                            onDrag = { pr ->
-                                backDragActive = true
-                                backDragProgress = pr
-                            },
-                            onFinish = { commit -> finishBackDrag(commit) },
-                            modifier = Modifier.align(Alignment.CenterStart),
-                        )
+                        // 左边缘系统手势排除矩形：只申请排除、不处理触摸（对点击透明），
+                        // 拖拽检测由根容器的 backDragGesture 驱动
+                        GestureExclusionStrip(Modifier.align(Alignment.CenterStart))
                     }
                 }
             }
