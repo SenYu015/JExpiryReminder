@@ -347,6 +347,12 @@ data class ExpiryItem(
      * expireAt 始终由这两项推导，不额外引入多个周期字段，旧数据缺字段按普通物品读取。
      */
     val repeatEnabled: Boolean = false,
+    /**
+     * 定点提醒时刻（"HH:mm"，空 = 未设置，仅循环任务可配置）。
+     * 设置后：该循环任务按提醒档位生成的触发日改在此时此刻提醒（未勾档位时默认按「当天」触发）；
+     * 未设置：沿用设置页的全局推送时刻。
+     */
+    val reminderTime: String = "",
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("id", id)
@@ -368,6 +374,7 @@ data class ExpiryItem(
         .put("rev", rev)
         .put("syncId", syncId)
         .put("repeatEnabled", repeatEnabled)
+        .put("reminderTime", reminderTime)
 
     companion object {
         fun fromJson(raw: Any?): ExpiryItem? {
@@ -410,6 +417,7 @@ data class ExpiryItem(
                 rev = raw.optLong("rev", 0L),
                 syncId = raw.optStringOrNull("syncId")?.trim().orEmpty(),
                 repeatEnabled = raw.optBoolean("repeatEnabled", false),
+                reminderTime = raw.optStringOrNull("reminderTime").orEmpty(),
             )
         }
 
@@ -522,8 +530,9 @@ data class SyncSlice(
  * 因 DATA_VERSION 仅作落盘标记、不参与读取分支判断，合并后统一记为 v11 以区别于两侧历史版本。
  * v12 增加物品的 repeatEnabled 循环任务标记（旧数据缺字段按 false 读取，不改写历史数据）。
  * v13 增加删除墓碑 tombstones（旧数据缺键按空读取）：删除动作经自动同步传播到另一台设备。
+ * v14 增加循环任务的定点提醒时刻 reminderTime（旧数据缺字段按空读取，不改写历史数据）。
  */
-const val DATA_VERSION = 13
+const val DATA_VERSION = 14
 
 // ---------------------------------------------------------------- 状态
 
@@ -572,6 +581,11 @@ object ExpiryCalc {
      * 循环物品完成本次后进入下一周期：以实际完成日为新起点，重新推导到期日，
      * 并清空本周期的提醒记录，让新周期的同一档位能再次触发。
      * 非循环物品或周期不合法时原样返回。
+     *
+     * 周期 1 天的特例：本周期只覆盖完成日当天，完成即翻篇。下一周期若仍从完成日起算，
+     * 到期日恒等于完成日（起始日+1−1=起始日），每天任务永远停在「今天到期」，
+     * 点「完成本次」永远推不动——到期日改从明天起算（「起始日+周期−1」公式不变，
+     * 仅起点越过本周期覆盖日）；「上次完成日」仍如实记录今天。
      */
     fun advanceCycle(
         item: ExpiryItem,
@@ -580,7 +594,12 @@ object ExpiryCalc {
     ): ExpiryItem {
         if (!item.repeatEnabled || item.shelfLife <= 0) return item
         val start = Dates.toISODate(today)
-        val nextExpire = computeExpireAt(start, item.shelfLife, item.shelfLifeUnit)
+        val cycleStart = if (item.shelfLifeUnit == ShelfLifeUnit.day && item.shelfLife == 1) {
+            Dates.toISODate(today.plusDays(1))
+        } else {
+            start
+        }
+        val nextExpire = computeExpireAt(cycleStart, item.shelfLife, item.shelfLifeUnit)
         if (nextExpire.isEmpty()) return item
         return item.copy(
             productionDate = start,

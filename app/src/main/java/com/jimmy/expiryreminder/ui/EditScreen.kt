@@ -202,6 +202,15 @@ fun EditScreen(
     var expireAt by remember { mutableStateOf(existing?.expireAt ?: prefill?.expireAt ?: "") }
     // 循环任务的到期日始终由「上次完成日 + 周期」推导，不允许停留在手动指定的旧日期
     var repeatEnabled by remember { mutableStateOf(existing?.repeatEnabled ?: false) }
+    // 定点提醒：循环任务的专属提醒时刻（"HH:mm"，空 = 未设置，走全局推送时刻）
+    var reminderTime by remember { mutableStateOf(existing?.reminderTime ?: "") }
+    var showFixedTimeDialog by remember { mutableStateOf(false) }
+    var fixedWheelHour by remember {
+        mutableStateOf(existing?.reminderTime?.substringBefore(':')?.toIntOrNull() ?: 22)
+    }
+    var fixedWheelMinute by remember {
+        mutableStateOf(existing?.reminderTime?.substringAfter(':')?.toIntOrNull() ?: 0)
+    }
     var manualExpire by remember {
         mutableStateOf(
             if (existing != null) {
@@ -541,6 +550,7 @@ fun EditScreen(
             updatedAt = Dates.nowIsoTimestamp(),
             spaceId = store.resolveSpaceId(spaceId),
             repeatEnabled = repeatEnabled,
+            reminderTime = reminderTime.takeIf { repeatEnabled && it.isNotBlank() } ?: "",
         )
         scope.launch {
             if (existing == null) store.createItem(context, draft)
@@ -821,6 +831,8 @@ fun EditScreen(
                             repeatEnabled = next
                             // 循环模式不允许停留在手动指定的到期日；关闭时保留当前日期作为手动值
                             manualExpire = !next
+                            // 关闭循环后定点提醒没有意义，一并清掉
+                            if (!next) reminderTime = ""
                             if (next) {
                                 if (!Dates.isValidISODate(productionDate)) {
                                     productionDate = Dates.todayISO()
@@ -1053,6 +1065,68 @@ fun EditScreen(
                             chipHeight = 26.dp,
                             compactLabel = true,
                         )
+
+                        // -------------------------------------- 定点提醒（循环任务专属）
+                        if (repeatEnabled) {
+                            FieldLabel("定点提醒", optional = true)
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                border = androidx.compose.foundation.BorderStroke(
+                                    1.dp, MaterialTheme.colorScheme.outlineVariant,
+                                ),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Row(
+                                    Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            if (reminderTime.isNotBlank()) "每个提醒日 $reminderTime 提醒" else "按提前天数档位触发",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.SemiBold,
+                                        )
+                                        Text(
+                                            if (reminderTime.isNotBlank()) "未勾档位时默认当天提醒"
+                                            else "关闭时沿用设置页的统一推送时刻",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    if (reminderTime.isNotBlank()) {
+                                        Text(
+                                            "修改",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .clickable {
+                                                    fixedWheelHour =
+                                                        reminderTime.substringBefore(':')
+                                                            .toIntOrNull() ?: 22
+                                                    fixedWheelMinute =
+                                                        reminderTime.substringAfter(':')
+                                                            .toIntOrNull() ?: 0
+                                                    showFixedTimeDialog = true
+                                                }
+                                                .padding(horizontal = 8.dp, vertical = 6.dp),
+                                        )
+                                        Spacer(Modifier.width(4.dp))
+                                    }
+                                    AppSwitch(
+                                        checked = reminderTime.isNotBlank(),
+                                        onCheckedChange = { on ->
+                                            if (on) {
+                                                showFixedTimeDialog = true
+                                            } else {
+                                                reminderTime = ""
+                                            }
+                                        },
+                                    )
+                                }
+                            }
+                        }
 
                         // -------------------------------------- 备注
                         Row(
@@ -1394,6 +1468,67 @@ fun EditScreen(
             },
             onDismiss = { customDayDialog = false },
         )
+    }
+
+    // 定点提醒时刻：滚轮选择，与设置页推送时刻同一套交互
+    if (showFixedTimeDialog) {
+        Dialog(
+            onDismissRequest = { showFixedTimeDialog = false },
+            properties = DialogProperties(
+                usePlatformDefaultWidth = false,
+                decorFitsSystemWindows = false,
+            ),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp)
+                    .imePadding(),
+                contentAlignment = Alignment.Center,
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(28.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    tonalElevation = 6.dp,
+                ) {
+                    Column(Modifier.padding(horizontal = 20.dp, vertical = 20.dp)) {
+                        Text(
+                            "选择定点提醒时刻",
+                            style = MaterialTheme.typography.headlineSmall,
+                            modifier = Modifier.padding(horizontal = 4.dp),
+                        )
+                        Text(
+                            "该循环任务的每个提醒日将在这一时刻提醒",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        TimeWheelPicker(
+                            hour = fixedWheelHour,
+                            minute = fixedWheelMinute,
+                            onHourChange = { fixedWheelHour = it },
+                            onMinuteChange = { fixedWheelMinute = it },
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End,
+                        ) {
+                            TextButton(onClick = { showFixedTimeDialog = false }) { Text("取消") }
+                            TextButton(onClick = {
+                                // 先让滚轮失焦把草稿交上来，等一帧再读，否则会存到旧值
+                                focusManager.clearFocus()
+                                scope.launch {
+                                    withFrameNanos { }
+                                    reminderTime = "%02d:%02d".format(fixedWheelHour, fixedWheelMinute)
+                                    showFixedTimeDialog = false
+                                }
+                            }) { Text("确定") }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // 图片拖动排序：只在「排序」按钮触发的弹窗里生效，日常点击缩略图仍是看大图

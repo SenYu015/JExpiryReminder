@@ -50,10 +50,11 @@ class SyncIdCompatTest {
     }
 
     @Test
-    fun `数据版本已升到 v13（含 syncId、分类默认提醒、循环任务标记与删除墓碑）`() {
+    fun `数据版本已升到 v14（含 syncId、分类默认提醒、循环任务标记、删除墓碑与定点提醒）`() {
         // v9 起 data.json 带 rev/revision 时钟，v10 加 syncId，
-        // v12 加循环任务标记；v13 加删除墓碑 tombstones（删除动作可同步到另一台设备）
-        assertEquals(13, DATA_VERSION)
+        // v12 加循环任务标记；v13 加删除墓碑 tombstones（删除动作可同步到另一台设备）；
+        // v14 加循环任务定点提醒 reminderTime
+        assertEquals(14, DATA_VERSION)
     }
 
     @Test
