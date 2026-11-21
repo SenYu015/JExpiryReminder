@@ -24,3 +24,6 @@ key.properties
 
 # AI 协作本地文件：不进公开仓库
 .workbuddy/
+
+# 端侧大模型 / 离线 ASR 模型（GB 级二进制，不入库）
+third_party/

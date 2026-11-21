@@ -12,6 +12,7 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <!-- 流体云 / Android 16 Live Updates：非运行时权限，仅用于把 7 天内到期汇总提升为胶囊，
          不涉及任何隐私数据；系统不支持或用户在设置里关闭时自动降级为普通通知。 -->
     <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
