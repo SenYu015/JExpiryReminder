@@ -81,7 +81,6 @@ object ReminderService {
         val body: String,
         val id: Int,
     )
-
     /** 设置页「后台可靠性」自检用的快照。 */
     data class ScheduledInfo(val count: Int, val nextAt: LocalDateTime?)
 
@@ -147,6 +146,49 @@ object ReminderService {
         return "$prefix $when_$count"
     }
 
+    /** 物品的定点提醒时刻；未设置或格式非法返回 null（沿用全局推送时刻）。 */
+    internal fun itemFixedTime(item: ExpiryItem): LocalTime? =
+        item.reminderTime.takeIf { it.isNotBlank() && item.repeatEnabled }
+            ?.let { fixedTimeOrNull(it) }
+
+    /** 定点时刻的合法版本：非法字符串返回 null 而不是回退 09:00。 */
+    internal fun fixedTimeOrNull(value: String): LocalTime? {
+        val match = Regex("^(\\d{1,2}):(\\d{2})$").find(value.trim()) ?: return null
+        val (h, m) = match.destructured
+        val hour = h.toInt()
+        val minute = m.toInt()
+        if (hour > 23 || minute > 59) return null
+        return LocalTime.of(hour, minute)
+    }
+
+    /**
+     * 物品实际参与排程的提醒时刻：设了定点用定点，否则用全局推送时刻。
+     */
+    internal fun itemNotifyTime(item: ExpiryItem, notifyTime: String): LocalTime =
+        itemFixedTime(item) ?: readNotifyTime(notifyTime)
+
+    /**
+     * 物品实际参与排程的档位：设了定点的循环任务若没勾任何档位，默认按「当天」触发，
+     * 否则定点时间永远不会被排程吃到。
+     */
+    internal fun effectiveRemindDays(item: ExpiryItem): List<Int> {
+        val levels = item.remindDays.filter { it >= 0 }.distinct()
+        if (levels.isEmpty() && itemFixedTime(item) != null) return listOf(0)
+        return levels
+    }
+
+    /** 提醒标题：定点任务用「定点提醒」，其余沿用「到期提醒」。 */
+    private fun notifyTitle(item: ExpiryItem): String =
+        if (itemFixedTime(item) != null) "定点提醒" else "到期提醒"
+
+    /**
+     * 提醒正文：定点任务在到期当天用「该{name}啦」这类口语化短句，
+     * 提前 N 天的定点档位与普通提醒保持 describe 的信息量（含剩余天数）。
+     */
+    private fun notifyBody(item: ExpiryItem, days: Int): String =
+        if (itemFixedTime(item) != null && days == 0) "该${item.name.trim()}啦"
+        else describe(item, days)
+
     /** 计算未来一段时间内所有需要系统提醒的计划。
      *  已过期、时间点已过的档位都不排。 */
     fun buildReminderPlan(
@@ -156,7 +198,6 @@ object ReminderService {
         /** 是否把「今天已过推送时刻、但还没提醒过」的档位转成 5 秒后的立即提醒。 */
         includeMissed: Boolean = false,
     ): List<PlannedReminder> {
-        val time = readNotifyTime(notifyTime)
         val drafts = mutableListOf<PlannedReminder>()
 
         for (item in items) {
@@ -164,10 +205,13 @@ object ReminderService {
             val remaining = Dates.daysUntil(item.expireAt, now.toLocalDate()) ?: continue
             if (remaining < 0) continue
 
-            val levels = item.remindDays.filter { it >= 0 }.distinct()
+            val levels = effectiveRemindDays(item)
+            // 定点提醒物品用自己的时刻，普通物品沿用全局推送时刻
+            val fireTime = itemNotifyTime(item, notifyTime)
+            val title = notifyTitle(item)
             for (days in levels) {
                 val fireDate = Dates.addDays(item.expireAt, -days)
-                val fireAt = Dates.parseISO(fireDate)?.atTime(time) ?: continue
+                val fireAt = Dates.parseISO(fireDate)?.atTime(fireTime) ?: continue
                 val key = "$fireDate:${item.id}:$days"
                 if (Duration.between(now, fireAt).toMillis() < MIN_LEAD_MS) {
                     // 今天已过推送时刻但这一档还没提醒过：5 秒后立即补发。
@@ -180,8 +224,8 @@ object ReminderService {
                                 key = key,
                                 itemId = item.id,
                                 at = now.plusSeconds(5),
-                                title = "到期提醒",
-                                body = describe(item, days),
+                                title = title,
+                                body = notifyBody(item, days),
                                 id = 0,
                             ),
                         )
@@ -193,8 +237,8 @@ object ReminderService {
                         key = key,
                         itemId = item.id,
                         at = fireAt,
-                        title = "到期提醒",
-                        body = describe(item, days),
+                        title = title,
+                        body = notifyBody(item, days),
                         id = 0,
                     )
                 )
@@ -245,7 +289,7 @@ object ReminderService {
         val showIntent = launchAppPendingIntent(context)
         for (entry in plan) {
             val triggerAt = entry.at.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
-            val pi = alarmPendingIntent(context, entry.id, entry.key, entry.itemId, entry.body)
+            val pi = alarmPendingIntent(context, entry.id, entry.key, entry.itemId, entry.title, entry.body)
             try {
                 when {
                     exact && useAlarmClock ->
@@ -259,7 +303,7 @@ object ReminderService {
             // 48 小时内再排一条 +90s 的备份闹钟：主闹钟被 ROM 省电策略吞掉时兜底。
             // requestCode 用负数，和真实提醒 id（正数）天然隔离；重复触发由去重键拦掉。
             if (triggerAt - System.currentTimeMillis() <= 48 * 3600_000L) {
-                val backup = alarmPendingIntent(context, -entry.id, entry.key, entry.itemId, entry.body)
+                val backup = alarmPendingIntent(context, -entry.id, entry.key, entry.itemId, entry.title, entry.body)
                 val backupAt = triggerAt + BACKUP_DELAY_MS
                 try {
                     if (exact) am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, backupAt, backup)
@@ -340,11 +384,11 @@ object ReminderService {
         val saved = scheduledPrefs(context).getStringSet(KEY_SCHEDULED_IDS, emptySet()) ?: emptySet()
         for (raw in saved) {
             val id = raw.toIntOrNull() ?: continue
-            am.cancel(alarmPendingIntent(context, id, "", "", ""))
+            am.cancel(alarmPendingIntent(context, id, "", "", "", ""))
             // 备份闹钟用负 requestCode，别漏取消，否则重排后旧备份会在错误时间弹
-            am.cancel(alarmPendingIntent(context, -id, "", "", ""))
+            am.cancel(alarmPendingIntent(context, -id, "", "", "", ""))
         }
-        am.cancel(alarmPendingIntent(context, BOOT_REQUEST_CODE, "", "", ""))
+        am.cancel(alarmPendingIntent(context, BOOT_REQUEST_CODE, "", "", "", ""))
     }
 
     private const val KEY_SCHEDULED_IDS = "scheduled_ids"
@@ -352,13 +396,14 @@ object ReminderService {
     private const val KEY_SCHEDULED_NEXT = "scheduled_next_at"
 
     private fun alarmPendingIntent(
-        context: Context, id: Int, key: String, itemId: String, body: String,
+        context: Context, id: Int, key: String, itemId: String, title: String, body: String,
     ): PendingIntent {
         val intent = Intent(context, AlarmReceiver::class.java)
             .setAction(AlarmReceiver.ACTION_FIRE)
             .putExtra(AlarmReceiver.EXTRA_KEY, key)
             .putExtra(AlarmReceiver.EXTRA_ITEM_ID, itemId)
             .putExtra(AlarmReceiver.EXTRA_ID, id)
+            .putExtra(AlarmReceiver.EXTRA_TITLE, title)
             .putExtra(AlarmReceiver.EXTRA_BODY, body)
         return PendingIntent.getBroadcast(
             context, id, intent,
@@ -728,33 +773,35 @@ object ReminderService {
         notifyTime: String,
     ): Int {
         if (!notifyEnabled || !hasNotificationPermission(context)) return 0
-        // 还没到推送时刻：交给闹钟，避免一开 App 就提前弹
-        if (!isPastNotifyTime(notifyTime)) return 0
 
+        val now = LocalDateTime.now()
         val today = Dates.todayISO()
         val hits = mutableListOf<String>()
         var firstId = 0
+        var firstTitle = ""
         var firstBody = ""
         var firstItemId: String? = null
 
         for (item in store.activeItems()) {
-            val days = Dates.daysUntil(item.expireAt) ?: continue
-            if (days < 0 || days !in item.remindDays) continue
+            val days = Dates.daysUntil(item.expireAt, now.toLocalDate()) ?: continue
+            if (days < 0 || days !in effectiveRemindDays(item)) continue
+            // 定点物品用自己的时刻判断，未到的先不弹，交给闹钟
+            if (now.toLocalTime().isBefore(itemNotifyTime(item, notifyTime))) continue
             val key = store.reminderKey(item, days, today)
             if (key in item.notifiedKeys) continue
             val id = ExpiryCalc.hashKey(key)
             if (hits.isEmpty()) {
                 firstId = id
-                firstBody = describe(item, days)
+                firstTitle = notifyTitle(item)
+                firstBody = notifyBody(item, days)
                 firstItemId = item.id
             }
             hits.add(key)
         }
 
         if (hits.isEmpty()) return 0
-        val detail =
-            if (hits.size == 1) firstBody else "${hits.size} 件物品即将到期，记得处理"
-        showNotification(context, firstId, "到期提醒", detail, firstItemId)
+        val detail = if (hits.size == 1) firstBody else "${hits.size} 件物品需要处理，记得查看"
+        showNotification(context, firstId, firstTitle, detail, firstItemId)
         store.markNotified(context, hits)
         return hits.size
     }

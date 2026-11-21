@@ -1,5 +1,6 @@
 package com.jimmy.expiryreminder.core
 
+import com.jimmy.expiryreminder.core.ImageStore
 import android.content.Context
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -499,9 +500,24 @@ class ExpiryStore private constructor() {
             val advanced = ExpiryCalc.advanceCycle(
                 current, today, Dates.nowIsoTimestamp(),
             )
-            if (advanced.expireAt == current.expireAt) return@withLock
-            nextExpire = advanced.expireAt
-            list[index] = advanced
+            // 周期 1 天的循环任务完成今天后，下一周期到期日仍是今天（起始日+周期−1），
+            // 不能拿「到期日没变」当无变化的判据——否则每天任务点「完成本次」永远没反应。
+            // 上次完成日也已推进到今天（当天重复点击）才算真正无变化。
+            if (advanced.expireAt == current.expireAt &&
+                advanced.productionDate == current.productionDate
+            ) {
+                return@withLock
+            }
+            // 到期日没变（当天到期当天完成）：保留本周期已提醒记录。
+            // notifiedKeys 的 key 带日期，明天是新 key 照常提醒；若这里清空，
+            // 完成动作引发的整包重排会立刻把今天已过的定点提醒补发一条，纯属打扰。
+            val settled = if (advanced.expireAt == current.expireAt) {
+                advanced.copy(notifiedKeys = current.notifiedKeys)
+            } else {
+                advanced
+            }
+            nextExpire = settled.expireAt
+            list[index] = settled
             _state.value = _state.value.copy(items = list)
             persistLocked(context)
         }

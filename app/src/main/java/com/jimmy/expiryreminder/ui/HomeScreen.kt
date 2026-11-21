@@ -651,6 +651,12 @@ fun HomeScreen(
                                                     context, "已完成本次，下次到期 $next",
                                                     Toast.LENGTH_SHORT,
                                                 ).show()
+                                            } else {
+                                                // 当天重复点击或无需推进：给出反馈而不是静默
+                                                Toast.makeText(
+                                                    context, "今天已经完成过本次了",
+                                                    Toast.LENGTH_SHORT,
+                                                ).show()
                                             }
                                         }
                                     },
