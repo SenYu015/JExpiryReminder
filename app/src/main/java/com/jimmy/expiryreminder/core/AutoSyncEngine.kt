@@ -1,5 +1,6 @@
 package com.jimmy.expiryreminder.core
 
+import com.jimmy.expiryreminder.core.ImageStore
 import android.app.AlarmManager
 import android.app.PendingIntent
 import android.content.Context

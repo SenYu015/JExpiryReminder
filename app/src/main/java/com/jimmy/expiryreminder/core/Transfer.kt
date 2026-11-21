@@ -1,5 +1,6 @@
 package com.jimmy.expiryreminder.core
 
+import com.jimmy.expiryreminder.core.ImageStore
 import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
