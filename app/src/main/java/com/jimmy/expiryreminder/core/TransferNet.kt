@@ -99,8 +99,9 @@ object TransferWire {
 /**
  * 接收端服务：监听本机端口，处理配对请求与物品包。
  *
- * 配对：对端发来 4 位配对码 → 本机弹出确认（用户比对两台屏幕上的数字）→ 同意后发一个一次性 token，
- * 之后传输必须带 token。token 只存在内存里，离开传输页即失效。
+ * 配对：对端发来 4 位配对码 + 临时公钥 → 本机弹出确认（用户比对两台屏幕上的数字）→
+ * 同意后用 ECDH + 配对码派生的密钥把「一次性 token + 长期信任密钥」加密回传（见 [PairCrypto]）。
+ * 长期密钥永不明文过网，之后传输必须带 token。token 只存在内存里，离开传输页即失效。
  */
 class TransferServer(
     private val context: Context,
@@ -277,6 +278,17 @@ class TransferServer(
             TransferWire.writeMessage(output, JSONObject().put("ok", false).put("error", "对方设备标识缺失"))
             return
         }
+        // v2 起配对码只用于人眼比对，长期密钥改走 ECDH + pin 派生的 AES-GCM 密文回传；
+        // 旧客户端不支持加密握手，宁可拒绝也不能退回明文，否则抓包照样能拿到密钥
+        val peerVer = msg.optInt("ver", 0)
+        val peerPub = msg.optString("pub")
+        if (peerVer < PairCrypto.VERSION || peerPub.isBlank()) {
+            TransferWire.writeMessage(
+                output,
+                JSONObject().put("ok", false).put("error", "对方版本过旧，请两台设备都升级后再配对"),
+            )
+            return
+        }
         val deferred = CompletableDeferred<Boolean>()
         pendingPair.set(deferred)
         _pairRequest.value = PairRequest(
@@ -303,14 +315,46 @@ class TransferServer(
         tokens[token] = fromId
         // 长期信任密钥：重复配对复用原值，避免把对方手上的旧密钥顶掉
         val secret = PeerTrust.ensure(context, fromId, fromName)
+        // 临时密钥对只用于这一次握手，算完即弃
+        val keyPair = runCatching { PairCrypto.newKeyPair() }.getOrNull()
+        val myPub = keyPair?.let { PairCrypto.publicKeyBase64(it) }
+        val sessionKey = if (keyPair != null && myPub != null) {
+            PairCrypto.deriveKey(
+                privateKey = keyPair.private,
+                peerPublicBase64 = peerPub,
+                clientPublicBase64 = peerPub,
+                serverPublicBase64 = myPub,
+                pin = pin,
+            )
+        } else {
+            null
+        }
+        // 密钥派生或加密失败都必须明确失败：绝不能把 secret 退回明文
+        val box = sessionKey?.let {
+            PairCrypto.encryptPayload(
+                it,
+                JSONObject()
+                    .put("token", token)
+                    .put("secret", secret)
+                    .put("name", deviceName)
+                    .put("id", deviceId),
+            )
+        }
+        if (box == null) {
+            // 握手失败：把刚登记的 token 撤回，别在内存里留一张没发出去的通行证
+            tokens.remove(token)
+            TransferWire.writeMessage(
+                output, JSONObject().put("ok", false).put("error", "配对握手失败，请重试"),
+            )
+            return
+        }
         TransferWire.writeMessage(
             output,
             JSONObject()
                 .put("ok", true)
-                .put("token", token)
-                .put("secret", secret)
-                .put("name", deviceName)
-                .put("id", deviceId),
+                .put("ver", PairCrypto.VERSION)
+                .put("pub", myPub)
+                .put("box", box),
         )
     }
 
@@ -728,6 +772,9 @@ object TransferClient {
         deviceName: String,
         deviceId: String,
     ): Result<Paired> = runCatching {
+        // 临时密钥对：只在本握手内使用，公钥随请求发出，私钥不外传
+        val keyPair = PairCrypto.newKeyPair()
+        val myPub = PairCrypto.publicKeyBase64(keyPair)
         Socket().use { socket ->
             socket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
             socket.soTimeout = (PAIR_TIMEOUT_MS + 10_000).toInt()
@@ -738,7 +785,9 @@ object TransferClient {
                     .put("cmd", "pair")
                     .put("pin", pin)
                     .put("device", deviceName)
-                    .put("deviceId", deviceId),
+                    .put("deviceId", deviceId)
+                    .put("ver", PairCrypto.VERSION)
+                    .put("pub", myPub),
             )
             val line = TransferWire.readLine(BufferedInputStream(socket.getInputStream()))
                 ?: throw IOException("对方没有响应")
@@ -746,11 +795,27 @@ object TransferClient {
             if (!json.optBoolean("ok")) {
                 throw IOException(json.optStringOrNull("error") ?: "配对失败")
             }
+            // 响应必须是 v2 密文；旧版对端会直接回明文 secret，这里一律不认
+            if (json.optInt("ver", 0) < PairCrypto.VERSION) {
+                throw IOException("对方版本过旧，请两台设备都升级后再配对")
+            }
+            val peerPub = json.optString("pub")
+            val box = json.optString("box")
+            if (peerPub.isBlank() || box.isBlank()) throw IOException("配对响应格式不正确")
+            val key = PairCrypto.deriveKey(
+                privateKey = keyPair.private,
+                peerPublicBase64 = peerPub,
+                clientPublicBase64 = myPub,
+                serverPublicBase64 = peerPub,
+                pin = pin,
+            ) ?: throw IOException("配对握手失败，请重试")
+            val payload = PairCrypto.decryptPayload(key, box)
+                ?: throw IOException("配对响应校验失败，配对码可能不一致")
             Paired(
-                token = json.optString("token"),
-                deviceName = json.optString("name").ifBlank { "对方设备" },
-                deviceId = json.optString("id"),
-                secret = json.optString("secret"),
+                token = payload.optString("token"),
+                deviceName = payload.optString("name").ifBlank { "对方设备" },
+                deviceId = payload.optString("id"),
+                secret = payload.optString("secret"),
             )
         }
     }
